@@ -1,0 +1,44 @@
+name: dance_baby_radio_flutter
+description: A Flutter Android application for Dance Baby Radio, matching the Nuxt 3 frontend styles and flows.
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Supabase integration
+  supabase_flutter: ^2.8.0
+
+  # Audio playback (supports dual-player gapless transitions)
+  just_audio: ^0.9.42
+
+  # Video background for specific genres
+  video_player: ^2.9.2
+
+  # Local storage for saving active genres
+  shared_preferences: ^2.2.3
+
+  # Beautiful typography matching Vuetify/Tailwind
+  google_fonts: ^6.2.1
+
+  # Cyberpunk loading spinners
+  flutter_spinkit: ^5.2.1
+
+  # Caching for network images (covers)
+  cached_network_image: ^3.4.1
+
+  # Svg support if needed
+  flutter_svg: ^2.0.10+1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/
