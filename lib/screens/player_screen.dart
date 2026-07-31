@@ -75,10 +75,53 @@ class _PlayerScreenState extends State<PlayerScreen> {
             final volume = widget.audioService.volume;
             final currentTime = widget.audioService.currentTime;
             final duration = widget.audioService.duration;
+            final isAudioReady = widget.audioService.isAudioReady;
 
             // Check if video should be shown
             final shouldShowVideo = activeTrack != null &&
                 (activeTrack.genre.contains('electronic') || activeTrack.genre.contains('relax'));
+
+            // Show loading splash screen if tracks are not loaded yet
+            if (!isAudioReady && activeTrack == null) {
+              return Container(
+                color: Colors.black,
+                width: double.infinity,
+                height: double.infinity,
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    // Stars Background
+                    const StarsBackground(),
+                    
+                    // Centered Logo and Loading Spinner
+                    Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(
+                          "DANCE BABY RADIO",
+                          style: GoogleFonts.daysOne(
+                            fontSize: 28,
+                            color: const Color(0xFF94D4E3),
+                            shadows: [
+                              Shadow(
+                                color: const Color(0xFFCCFBF7).withOpacity(0.8),
+                                blurRadius: 15,
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 30),
+                        const SpinKitRing(
+                          color: Color(0xFF64EEFF),
+                          size: 50,
+                          lineWidth: 2,
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              );
+            }
 
             return Stack(
               children: [

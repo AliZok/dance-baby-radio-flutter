@@ -8,7 +8,7 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   // Make status bar and navigation bar transparent/translucent for full-screen immersion
-  SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
+  SystemChrome.setSystemUIOverlayStyle(const SystemUIOverlayStyle(
     statusBarColor: Colors.transparent,
     statusBarIconBrightness: Brightness.light,
     systemNavigationBarColor: Colors.black,
@@ -18,9 +18,8 @@ void main() async {
   // Initialize Supabase
   await SupabaseService.initialize();
 
-  // Initialize Audio Service
+  // Initialize Audio Service (without blocking the app startup!)
   final audioService = AudioService();
-  await audioService.initialize();
 
   runApp(MyApp(audioService: audioService));
 }
