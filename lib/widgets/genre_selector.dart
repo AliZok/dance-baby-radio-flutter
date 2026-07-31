@@ -4,10 +4,14 @@ import '../services/audio_service.dart';
 
 class GenreSelector extends StatefulWidget {
   final AudioService audioService;
+  final bool isOpen;
+  final VoidCallback onToggle;
 
   const GenreSelector({
     Key? key,
     required this.audioService,
+    required this.isOpen,
+    required this.onToggle,
   }) : super(key: key);
 
   @override
@@ -15,8 +19,6 @@ class GenreSelector extends StatefulWidget {
 }
 
 class _GenreSelectorState extends State<GenreSelector> {
-  bool _isOpen = false;
-
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
@@ -30,94 +32,82 @@ class _GenreSelectorState extends State<GenreSelector> {
           children: [
             // Genre Button
             GestureDetector(
-              onTap: () {
-                setState(() {
-                  _isOpen = !_isOpen;
-                });
-              },
+              onTap: widget.onToggle,
               child: Container(
                 width: 80,
                 height: 80,
                 decoration: BoxDecoration(
-                  color: const Color(0xFF10191A).withOpacity(0.6),
+                  color: const Color(0xFF10191A).withOpacity(0.593),
                   shape: BoxShape.circle,
-                  border: Border.all(
-                    color: const Color(0xFF003E47),
-                    width: 1,
-                  ),
                 ),
                 alignment: Alignment.center,
                 child: Text(
                   "GENRE",
                   style: GoogleFonts.daysOne(
                     fontSize: 10,
-                    color: Colors.white.withOpacity(0.6),
+                    color: Colors.white.withOpacity(widget.isOpen ? 1.0 : 0.6),
                   ),
                 ),
               ),
             ),
 
-            // Floating Genre List
-            if (_isOpen)
+            // Floating Genre List (Select Box)
+            if (widget.isOpen)
               Positioned(
                 bottom: 90,
                 left: 0,
-                child: Container(
-                  width: 200,
-                  padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 10),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF10191A).withOpacity(0.85),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                      color: const Color(0xFF003E47),
-                      width: 1,
+                child: GestureDetector(
+                  onTap: () {}, // Prevents closing when tapping inside the list
+                  child: Container(
+                    width: 200,
+                    padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF10191A).withOpacity(0.593),
+                      borderRadius: BorderRadius.circular(12),
                     ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.5),
-                        blurRadius: 10,
-                        spreadRadius: 2,
-                      ),
-                    ],
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: genres.map((genreEl) {
-                      return GestureDetector(
-                        onTap: () {
-                          widget.audioService.toggleGenre(genreEl);
-                        },
-                        child: Container(
-                          color: Colors.transparent,
-                          padding: const EdgeInsets.symmetric(vertical: 8.0),
-                          child: Row(
-                            children: [
-                              Expanded(
-                                child: Text(
-                                  genreEl.text,
-                                  style: TextStyle(
-                                    fontSize: 13,
-                                    color: Colors.white.withOpacity(
-                                      genreEl.active ? 1.0 : 0.5,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: genres.map((genreEl) {
+                        return GestureDetector(
+                          onTap: () {
+                            widget.audioService.toggleGenre(genreEl);
+                          },
+                          child: Container(
+                            color: Colors.transparent,
+                            padding: const EdgeInsets.symmetric(vertical: 10.0),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    genreEl.text,
+                                    style: TextStyle(
+                                      fontFamily: 'farsiFont', // Fallback to system if not loaded
+                                      fontSize: 13,
+                                      color: Colors.white.withOpacity(
+                                        genreEl.active ? 1.0 : 0.5,
+                                      ),
+                                      fontWeight: genreEl.active
+                                          ? FontWeight.bold
+                                          : FontWeight.normal,
+                                      // Glowing/bright light effect for active items
+                                      shadows: genreEl.active
+                                          ? [
+                                              Shadow(
+                                                color: Colors.white.withOpacity(0.8),
+                                                blurRadius: 8,
+                                              ),
+                                            ]
+                                          : null,
                                     ),
-                                    fontWeight: genreEl.active
-                                        ? FontWeight.bold
-                                        : FontWeight.normal,
                                   ),
                                 ),
-                              ),
-                              if (genreEl.active)
-                                const Icon(
-                                  Icons.check,
-                                  color: Color(0xFF00FFFF),
-                                  size: 16,
-                                ),
-                            ],
+                              ],
+                            ),
                           ),
-                        ),
-                      );
-                    }).toList(),
+                        );
+                      }).toList(),
+                    ),
                   ),
                 ),
               ),
