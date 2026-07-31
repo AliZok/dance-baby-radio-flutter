@@ -7,7 +7,6 @@ import '../services/audio_service.dart';
 import '../widgets/stars_background.dart';
 import '../widgets/video_background.dart';
 import '../widgets/genre_selector.dart';
-import '../widgets/welcome_modal.dart';
 
 class PlayerScreen extends StatefulWidget {
   final AudioService audioService;
@@ -22,7 +21,6 @@ class PlayerScreen extends StatefulWidget {
 }
 
 class _PlayerScreenState extends State<PlayerScreen> {
-  bool _showWelcomeModal = true;
   bool _showControls = true; // Simulates hover state/visibility
   bool _isGenreOpen = false; // Manages the open/close state of the genre selector
 
@@ -455,18 +453,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
                     ),
                   ),
                 ),
-
-                // 9. Cyberpunk Welcome Modal Overlay
-                if (_showWelcomeModal)
-                  WelcomeModal(
-                    isReady: widget.audioService.isAudioReady && !widget.audioService.isLoading,
-                    onLetsGo: () {
-                      setState(() {
-                        _showWelcomeModal = false;
-                      });
-                      widget.audioService.playMusic();
-                    },
-                  ),
               ],
             );
           },

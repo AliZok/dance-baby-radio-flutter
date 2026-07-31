@@ -97,6 +97,11 @@ class AudioService extends ChangeNotifier {
 
     // 2. Fetch initial tracks in parallel
     await _loadInitialTracks();
+
+    // 3. Start playing automatically as soon as the app is ready
+    if (_isAudioReady) {
+      resumeAudio();
+    }
   }
 
   Future<void> _loadInitialTracks() async {
