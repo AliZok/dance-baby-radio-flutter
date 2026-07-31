@@ -1,5 +1,6 @@
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter_spinkit/flutter_spinkit.dart';
@@ -21,7 +22,7 @@ class PlayerScreen extends StatefulWidget {
 }
 
 class _PlayerScreenState extends State<PlayerScreen> {
-  bool _showControls = true; // Simulates hover state/visibility
+  bool _showControls = false; // In mobile front-end, controls are hidden by default
   bool _isGenreOpen = false; // Manages the open/close state of the genre selector
 
   String _formatDuration(Duration duration) {
@@ -38,12 +39,31 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
   }
 
+  // Custom SVG path for the exact Repeat icon from the Nuxt project
+  Widget _buildRepeatIcon(bool isActive) {
+    return SvgPicture.string(
+      '''
+      <svg xmlns="http://www.w3.org/2000/svg" width="25" height="25" fill="${isActive ? '#52DCFF' : '#ffffff'}" class="bi bi-arrow-repeat" viewBox="0 0 16 16">
+          <path d="M11.534 7h3.932a.25.25 0 0 1 .192.41l-1.966 2.36a.25.25 0 0 1-.384 0l-1.966-2.36a.25.25 0 0 1 .192-.41zm-11 2h3.932a.25.25 0 0 0 .192-.41L2.692 6.23a.25.25 0 0 0-.384 0L.342 8.59A.25.25 0 0 0 .534 9z" />
+          <path fill-rule="evenodd" d="M8 3c-1.552 0-2.94.707-3.857 1.818a.5.5 0 1 1-.771-.636A6.002 6.002 0 0 1 13.917 7H12.9A5.002 5.002 0 0 0 8 3zM3.1 9a5.002 5.002 0 0 0 8.757 2.182.5.5 0 1 1 .771.636A6.002 6.002 0 0 1 2.083 9H3.1z" />
+      </svg>
+      ''',
+      width: 25,
+      height: 25,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
       body: GestureDetector(
-        onTap: _closeGenreMenu, // Closes the genre selector if tapped anywhere else on the screen
+        onTap: () {
+          _closeGenreMenu();
+          setState(() {
+            _showControls = false; // Tap anywhere else to hide controls
+          });
+        },
         behavior: HitTestBehavior.translucent,
         child: ListenableBuilder(
           listenable: widget.audioService,
@@ -140,61 +160,68 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 Center(
                   child: Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 24.0),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
+                    child: Stack(
+                      alignment: Alignment.center,
+                      clipBehavior: Clip.none,
                       children: [
-                        // Player controls row (Repeat & Volume)
-                        AnimatedOpacity(
+                        // Animated Controls (Repeat on Right, Volume on Left)
+                        // They slide out from behind the Player Card
+                        AnimatedPositioned(
                           duration: const Duration(milliseconds: 300),
-                          opacity: _showControls ? 1.0 : 0.0,
-                          child: Padding(
-                            padding: const EdgeInsets.only(bottom: 12.0),
+                          curve: Curves.easeInOut,
+                          top: _showControls ? -45 : 10, // Slides up/down
+                          left: 0,
+                          right: 0,
+                          child: AnimatedOpacity(
+                            duration: const Duration(milliseconds: 300),
+                            opacity: _showControls ? 1.0 : 0.0,
                             child: SizedBox(
                               width: 300,
                               child: Row(
                                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                 children: [
-                                  // Repeat Button
-                                  IconButton(
-                                    onPressed: widget.audioService.toggleRepeat,
-                                    icon: Icon(
-                                      Icons.repeat,
-                                      color: isRepeat
-                                          ? const Color(0xFF00FFFF)
-                                          : Colors.white.withOpacity(0.5),
-                                      size: 24,
+                                  // Volume Slider (Left side, NO speaker icon)
+                                  Container(
+                                    width: 110,
+                                    height: 30,
+                                    padding: const EdgeInsets.symmetric(horizontal: 6),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFF10191A).withOpacity(0.593),
+                                      borderRadius: BorderRadius.circular(30),
+                                    ),
+                                    alignment: Alignment.center,
+                                    child: SliderTheme(
+                                      data: SliderTheme.of(context).copyWith(
+                                        activeTrackColor: const Color(0xFF58D1EF),
+                                        inactiveTrackColor: Colors.white24,
+                                        thumbColor: const Color(0xFF4E4E4E),
+                                        trackHeight: 5.0,
+                                        thumbShape: const RoundSliderThumbShape(
+                                          enabledThumbRadius: 7.0,
+                                        ),
+                                        overlayShape: SliderComponentShape.noOverlay,
+                                      ),
+                                      child: Slider(
+                                        value: volume,
+                                        min: 0.0,
+                                        max: 1.0,
+                                        onChanged: widget.audioService.setVolume,
+                                      ),
                                     ),
                                   ),
-                                  // Volume Slider
-                                  SizedBox(
-                                    width: 120,
-                                    child: Row(
-                                      children: [
-                                        Icon(
-                                          Icons.volume_up,
-                                          color: Colors.white.withOpacity(0.5),
-                                          size: 18,
-                                        ),
-                                        Expanded(
-                                          child: SliderTheme(
-                                            data: SliderTheme.of(context).copyWith(
-                                              activeTrackColor: const Color(0xFF58D1EF),
-                                              inactiveTrackColor: Colors.white24,
-                                              thumbColor: const Color(0xFF4E4E4E),
-                                              trackHeight: 3.0,
-                                              thumbShape: const RoundSliderThumbShape(
-                                                enabledThumbRadius: 6.0,
-                                              ),
-                                            ),
-                                            child: Slider(
-                                              value: volume,
-                                              min: 0.0,
-                                              max: 1.0,
-                                              onChanged: widget.audioService.setVolume,
-                                            ),
-                                          ),
-                                        ),
-                                      ],
+
+                                  // Repeat Button (Right side, custom SVG icon)
+                                  GestureDetector(
+                                    onTap: widget.audioService.toggleRepeat,
+                                    child: Container(
+                                      width: 40,
+                                      height: 30,
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFF10191A).withOpacity(0.593),
+                                        borderRadius: BorderRadius.circular(30),
+                                      ),
+                                      alignment: Alignment.center,
+                                      child: _buildRepeatIcon(isRepeat),
                                     ),
                                   ),
                                 ],
@@ -208,7 +235,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                           onTap: () {
                             _closeGenreMenu();
                             setState(() {
-                              _showControls = !_showControls;
+                              _showControls = !_showControls; // Toggles sliding animation
                             });
                           },
                           child: Container(
