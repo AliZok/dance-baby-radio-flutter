@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:audio_session/audio_session.dart';
 import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -83,6 +84,12 @@ class AudioService extends ChangeNotifier {
     _isLoading = true;
     notifyListeners();
 
+    // Register as a native music session. This requests the correct Android
+    // audio focus and lets playback continue naturally while the app is in the
+    // background or the device is locked.
+    final session = await AudioSession.instance;
+    await session.configure(const AudioSessionConfiguration.music());
+
     // 1. Load genres from SharedPreferences
     final prefs = await SharedPreferences.getInstance();
     final genresJson = prefs.getString('myGenres');
@@ -101,6 +108,11 @@ class AudioService extends ChangeNotifier {
     // 3. Start playing automatically as soon as the app is ready
     if (_isAudioReady) {
       resumeAudio();
+    } else {
+      // If not ready, listen to player state or just force play when ready
+      _preloadPrimary().then((_) {
+        resumeAudio();
+      });
     }
   }
 
@@ -417,22 +429,30 @@ class AudioService extends ChangeNotifier {
     notifyListeners();
   }
 
-  void toggleRepeat() {
+  Future<void> toggleRepeat() async {
     _isRepeat = !_isRepeat;
     notifyListeners();
+
+    // Use the players' native repeat-one mode. This guarantees that reaching
+    // the end never advances automatically while repeat is enabled. A manual
+    // Next action still switches players/tracks normally.
+    final loopMode = _isRepeat ? LoopMode.one : LoopMode.off;
+    await Future.wait([
+      _playerPrimary.setLoopMode(loopMode),
+      _playerSupport.setLoopMode(loopMode),
+    ]);
   }
 
   Future<void> toggleGenre(Genre genre) async {
+    // Match the frontend exactly: every genre can independently be enabled or
+    // disabled, including turning all filters off (which means "all genres").
     genre.active = !genre.active;
     notifyListeners();
 
-    // Save to SharedPreferences
+    // Persist the same `myGenres` array used by the mobile web version.
     final prefs = await SharedPreferences.getInstance();
     final genresJson = jsonEncode(_genres.map((g) => g.toJson()).toList());
     await prefs.setString('myGenres', genresJson);
-
-    // Re-fetch both tracks to match the new genre filters
-    await _loadInitialTracks();
   }
 
   @override

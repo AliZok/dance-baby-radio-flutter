@@ -16,6 +16,7 @@ class VideoBackground extends StatefulWidget {
 class _VideoBackgroundState extends State<VideoBackground> {
   VideoPlayerController? _controller;
   bool _isInitialized = false;
+  bool _isInitializing = false;
 
   @override
   void initState() {
@@ -28,37 +29,49 @@ class _VideoBackgroundState extends State<VideoBackground> {
   @override
   void didUpdateWidget(covariant VideoBackground oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.shouldShow && !_isInitialized) {
+    if (widget.shouldShow && !_isInitialized && !_isInitializing) {
       _initializeVideo();
-    } else if (!widget.shouldShow && _isInitialized) {
+    } else if (!widget.shouldShow &&
+        (_isInitialized || _isInitializing || _controller != null)) {
       _disposeVideo();
     }
   }
 
   Future<void> _initializeVideo() async {
+    if (_isInitializing || _isInitialized) return;
+    _isInitializing = true;
     const videoUrl = 'https://static.vecteezy.com/system/resources/previews/003/769/185/mp4/interstellar-space-travel-universe-to-the-m31-spiral-galaxy-free-video.mp4';
-    _controller = VideoPlayerController.networkUrl(Uri.parse(videoUrl));
+    final controller = VideoPlayerController.networkUrl(Uri.parse(videoUrl));
+    _controller = controller;
     
     try {
-      await _controller!.initialize();
-      await _controller!.setVolume(0.0); // Muted
-      await _controller!.setLooping(true);
-      await _controller!.play();
-      if (mounted) {
+      await controller.initialize();
+      await controller.setVolume(0.0);
+      await controller.setLooping(true);
+      if (!mounted || !widget.shouldShow || _controller != controller) {
+        await controller.dispose();
+        return;
+      }
+      await controller.play();
+      if (mounted && _controller == controller) {
         setState(() {
           _isInitialized = true;
         });
       }
     } catch (e) {
       print('VideoBackground initialization failed: $e');
+    } finally {
+      _isInitializing = false;
     }
   }
 
   void _disposeVideo() {
-    _controller?.pause();
-    _controller?.dispose();
+    final controller = _controller;
     _controller = null;
     _isInitialized = false;
+    _isInitializing = false;
+    controller?.pause();
+    controller?.dispose();
   }
 
   @override

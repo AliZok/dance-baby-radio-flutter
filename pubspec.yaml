@@ -1,6 +1,6 @@
 name: dance_baby_radio_flutter
 description: A Flutter Android application for Dance Baby Radio, matching the Nuxt 3 frontend styles and flows.
-version: 1.0.0+1
+version: 1.0.6+7
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -14,6 +14,9 @@ dependencies:
 
   # Audio playback (supports dual-player gapless transitions)
   just_audio: ^0.9.42
+
+  # Lock screen / notification media controls (play, pause, next)
+  audio_service: ^0.18.15
 
   # Video background for specific genres
   video_player: ^2.9.2
@@ -32,13 +35,23 @@ dependencies:
 
   # Svg support if needed
   flutter_svg: ^2.0.10+1
+  audio_session: ^0.1.25
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^3.0.0
+  flutter_launcher_icons: ^0.14.4
 
 flutter:
   uses-material-design: true
   assets:
     - assets/images/
+
+flutter_launcher_icons:
+  android: true
+  image_path: "../dance-baby-radio-frontend/public/favicon/dance-baby-radio-no-back-2.png"
+  adaptive_icon_background: "#000000"
+  adaptive_icon_foreground: "../dance-baby-radio-frontend/public/favicon/dance-baby-radio-no-back-2.png"
+  adaptive_icon_foreground_inset: 18
+  min_sdk_android: 21

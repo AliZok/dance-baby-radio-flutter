@@ -1,4 +1,3 @@
-import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -8,6 +7,52 @@ import '../services/audio_service.dart';
 import '../widgets/stars_background.dart';
 import '../widgets/video_background.dart';
 import '../widgets/genre_selector.dart';
+
+/// Draws a solid right-pointing triangle (▶), matching the Nuxt frontend's
+/// `.button-icon` CSS-border triangle trick, but as real vector geometry so
+/// it always renders crisp, correctly centered and pointing right on every
+/// device (the CSS border-hack can render inconsistently in Flutter).
+class _RightTriangle extends StatelessWidget {
+  final double width;
+  final double height;
+  final Color color;
+
+  const _RightTriangle({
+    required this.width,
+    required this.height,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return CustomPaint(
+      size: Size(width, height),
+      painter: _RightTrianglePainter(color),
+    );
+  }
+}
+
+class _RightTrianglePainter extends CustomPainter {
+  final Color color;
+  _RightTrianglePainter(this.color);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.fill;
+    final path = Path()
+      ..moveTo(0, 0)
+      ..lineTo(size.width, size.height / 2)
+      ..lineTo(0, size.height)
+      ..close();
+    canvas.drawPath(path, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _RightTrianglePainter oldDelegate) =>
+      oldDelegate.color != color;
+}
 
 class PlayerScreen extends StatefulWidget {
   final AudioService audioService;
@@ -43,7 +88,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Widget _buildRepeatIcon(bool isActive) {
     return SvgPicture.string(
       '''
-      <svg xmlns="http://www.w3.org/2000/svg" width="25" height="25" fill="${isActive ? '#52DCFF' : '#ffffff'}" class="bi bi-arrow-repeat" viewBox="0 0 16 16">
+      <svg xmlns="http://www.w3.org/2000/svg" width="25" height="25" fill="${isActive ? '#52DCFF' : '#66FFFFFF'}" class="bi bi-arrow-repeat" viewBox="0 0 16 16">
           <path d="M11.534 7h3.932a.25.25 0 0 1 .192.41l-1.966 2.36a.25.25 0 0 1-.384 0l-1.966-2.36a.25.25 0 0 1 .192-.41zm-11 2h3.932a.25.25 0 0 0 .192-.41L2.692 6.23a.25.25 0 0 0-.384 0L.342 8.59A.25.25 0 0 0 .534 9z" />
           <path fill-rule="evenodd" d="M8 3c-1.552 0-2.94.707-3.857 1.818a.5.5 0 1 1-.771-.636A6.002 6.002 0 0 1 13.917 7H12.9A5.002 5.002 0 0 0 8 3zM3.1 9a5.002 5.002 0 0 0 8.757 2.182.5.5 0 1 1 .771.636A6.002 6.002 0 0 1 2.083 9H3.1z" />
       </svg>
@@ -53,19 +98,47 @@ class _PlayerScreenState extends State<PlayerScreen> {
     );
   }
 
+  Widget _buildDefaultCoverBrand() {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        Image.asset(
+          'assets/images/background-dance-1.jpg',
+          fit: BoxFit.cover,
+        ),
+        Align(
+          // Frontend: `.back-logo { top: 71%; transform: translateY(-50%) }`.
+          alignment: const Alignment(0, 0.42),
+          child: IgnorePointer(
+            child: SizedBox(
+              width: 220,
+              child: Text(
+                'DANCE BABY RADIO',
+                textAlign: TextAlign.center,
+                style: GoogleFonts.daysOne(
+                  fontSize: 20,
+                  color: const Color(0xFFD8F6FF),
+                  shadows: const [
+                    Shadow(
+                      color: Color(0xFF2B3D3C),
+                      offset: Offset(5, 10),
+                      blurRadius: 2,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
-      body: GestureDetector(
-        onTap: () {
-          _closeGenreMenu();
-          setState(() {
-            _showControls = false; // Tap anywhere else to hide controls
-          });
-        },
-        behavior: HitTestBehavior.translucent,
-        child: ListenableBuilder(
+      body: ListenableBuilder(
           listenable: widget.audioService,
           builder: (context, child) {
             final activeTrack = widget.audioService.activeTrack;
@@ -125,37 +198,66 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
             return Stack(
               children: [
-                // 1. Blurred Background Image
+                // Video sits behind and blends through the dimmed cover for
+                // electronic/relax, matching the mobile frontend layering.
                 Positioned.fill(
-                  child: AnimatedSwitcher(
-                    duration: const Duration(seconds: 1),
-                    child: activeTrack?.cover.isNotEmpty == true
-                        ? CachedNetworkImage(
-                            key: ValueKey(activeTrack!.cover),
-                            imageUrl: activeTrack.cover,
-                            fit: BoxFit.cover,
-                            placeholder: (context, url) => Image.asset(
+                  child: VideoBackground(shouldShow: shouldShowVideo),
+                ),
+
+                // Full-screen, center-cropped cover. The dark translucent layer
+                // keeps it atmospheric while allowing the video to show through.
+                Positioned.fill(
+                  child: Opacity(
+                    opacity: shouldShowVideo ? 0.46 : 0.58,
+                    child: ColorFiltered(
+                      colorFilter: const ColorFilter.mode(
+                        Color(0x66000000),
+                        BlendMode.srcATop,
+                      ),
+                      child: AnimatedSwitcher(
+                        duration: const Duration(seconds: 1),
+                        child: activeTrack?.cover.isNotEmpty == true
+                            ? CachedNetworkImage(
+                                key: ValueKey(activeTrack!.cover),
+                                imageUrl: activeTrack.cover,
+                                fit: BoxFit.cover,
+                                placeholder: (context, url) => Image.asset(
+                                  'assets/images/background-dance-1.jpg',
+                                  fit: BoxFit.cover,
+                                ),
+                                errorWidget: (context, url, error) => Image.asset(
+                                  'assets/images/background-dance-1.jpg',
+                                  fit: BoxFit.cover,
+                                ),
+                              )
+                            : Image.asset(
                               'assets/images/background-dance-1.jpg',
+                              key: const ValueKey('default_bg'),
                               fit: BoxFit.cover,
                             ),
-                            errorWidget: (context, url, error) => Image.asset(
-                              'assets/images/background-dance-1.jpg',
-                              fit: BoxFit.cover,
-                            ),
-                          )
-                        : Image.asset(
-                            'assets/images/background-dance-1.jpg',
-                            key: const ValueKey('default_bg'),
-                            fit: BoxFit.cover,
-                          ),
+                      ),
+                    ),
                   ),
                 ),
 
-                // 2. Stars Background
-                const StarsBackground(),
+                const Positioned.fill(
+                  child: Opacity(
+                    opacity: 0.5,
+                    child: StarsBackground(),
+                  ),
+                ),
 
-                // 3. Video Background
-                VideoBackground(shouldShow: shouldShowVideo),
+                // Captures only empty-page taps; interactive controls are
+                // painted later in this Stack and therefore win hit testing.
+                Positioned.fill(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () {
+                      _closeGenreMenu();
+                      setState(() => _showControls = false);
+                    },
+                  ),
+                ),
 
                 // 4. Header (Top Left)
                 Positioned(
@@ -167,7 +269,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                       Text(
                         "DANCE BABY RADIO",
                         style: GoogleFonts.daysOne(
-                          fontSize: 22,
+                          fontSize: 18,
                           color: const Color(0xFF94D4E3),
                           shadows: [
                             Shadow(
@@ -201,18 +303,23 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
                 // 5. Main Player Box (Center)
                 Center(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 24.0),
-                    child: Stack(
+                  child: Transform.translate(
+                    offset: const Offset(0, -27.5),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 24.0),
+                      child: Stack(
                       alignment: Alignment.center,
-                      clipBehavior: Clip.none,
+                      clipBehavior: Clip.hardEdge,
                       children: [
                         // Animated Controls (Repeat on Right, Volume on Left)
                         // They slide out from behind the Player Card
                         AnimatedPositioned(
                           duration: const Duration(milliseconds: 300),
                           curve: Curves.easeInOut,
-                          top: _showControls ? -45 : 10, // Slides up/down
+                          // Both positions are inside the Stack's hit-test
+                          // bounds. Previously these controls were painted at
+                          // top:-45, visible but impossible to tap.
+                          top: _showControls ? 5 : 60,
                           left: 0,
                           right: 0,
                           child: AnimatedOpacity(
@@ -226,7 +333,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                   // Volume Slider (Left side, NO speaker icon)
                                   Container(
                                     width: 110,
-                                    height: 30,
+                                    height: 40,
                                     padding: const EdgeInsets.symmetric(horizontal: 6),
                                     decoration: BoxDecoration(
                                       color: const Color(0xFF10191A).withOpacity(0.593),
@@ -256,9 +363,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                   // Repeat Button (Right side, custom SVG icon)
                                   GestureDetector(
                                     onTap: widget.audioService.toggleRepeat,
+                                    behavior: HitTestBehavior.opaque,
                                     child: Container(
                                       width: 40,
-                                      height: 30,
+                                      height: 40,
                                       decoration: BoxDecoration(
                                         color: const Color(0xFF10191A).withOpacity(0.593),
                                         borderRadius: BorderRadius.circular(30),
@@ -274,16 +382,21 @@ class _PlayerScreenState extends State<PlayerScreen> {
                         ),
 
                         // Player Card
-                        GestureDetector(
-                          onTap: () {
-                            _closeGenreMenu();
-                            setState(() {
-                              _showControls = !_showControls; // Toggles sliding animation
-                            });
-                          },
-                          child: Container(
+                        Padding(
+                          // Reserve real layout space for the controls so they
+                          // remain tappable while visually sliding from behind
+                          // the card.
+                          padding: const EdgeInsets.only(top: 55),
+                          child: GestureDetector(
+                            onTap: () {
+                              _closeGenreMenu();
+                              setState(() {
+                                _showControls = !_showControls;
+                              });
+                            },
+                            child: Container(
                             width: 300,
-                            padding: const EdgeInsets.all(18),
+                            padding: const EdgeInsets.fromLTRB(18, 40, 18, 18),
                             decoration: BoxDecoration(
                               color: const Color(0xFF0C0C0C).withOpacity(0.64),
                               borderRadius: BorderRadius.circular(20),
@@ -301,10 +414,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
                             child: Column(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                // Cover Image / Play Button
-                                GestureDetector(
-                                  onTap: widget.audioService.playMusic,
-                                  child: Stack(
+                                // Cover Image / Play Button. Only the centered
+                                // play area owns the playback tap; tapping the
+                                // poster around it reaches the card and toggles
+                                // the sliding details, as on mobile web.
+                                Stack(
                                     alignment: Alignment.center,
                                     children: [
                                       // Cover Image
@@ -327,21 +441,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                           borderRadius: BorderRadius.circular(20),
                                           child: activeTrack?.cover.isNotEmpty == true
                                               ? CachedNetworkImage(
-                                                  imageUrl: activeTrack.cover,
+                                                  imageUrl: activeTrack!.cover,
                                                   fit: BoxFit.cover,
-                                                  placeholder: (context, url) => Image.asset(
-                                                    'assets/images/background-dance-1.jpg',
-                                                    fit: BoxFit.cover,
-                                                  ),
-                                                  errorWidget: (context, url, error) => Image.asset(
-                                                    'assets/images/background-dance-1.jpg',
-                                                    fit: BoxFit.cover,
-                                                  ),
+                                                  placeholder: (context, url) =>
+                                                      _buildDefaultCoverBrand(),
+                                                  errorWidget:
+                                                      (context, url, error) =>
+                                                          _buildDefaultCoverBrand(),
                                                 )
-                                              : Image.asset(
-                                                  'assets/images/background-dance-1.jpg',
-                                                  fit: BoxFit.cover,
-                                                ),
+                                              : _buildDefaultCoverBrand(),
                                         ),
                                       ),
 
@@ -353,31 +461,42 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                         ),
 
                                       // Play Button Overlay (when paused and not loading)
-                                      if (!isPlaying && !isLoading)
-                                        Container(
-                                          width: 200,
-                                          height: 200,
-                                          decoration: BoxDecoration(
-                                            color: const Color(0xFF10191A).withOpacity(0.59),
-                                            shape: BoxShape.circle,
-                                          ),
-                                          alignment: Alignment.center,
-                                          child: Container(
-                                            width: 0,
-                                            height: 0,
-                                            margin: const EdgeInsets.only(left: 10),
-                                            decoration: const BoxDecoration(
-                                              border: Border(
-                                                top: BorderSide(color: Colors.transparent, width: 19),
-                                                bottom: BorderSide(color: Colors.transparent, width: 19),
-                                                left: BorderSide(color: Color(0xFF52DCFF), width: 28),
+                                      // Group-opacity 0.4 matches the frontend's
+                                      // `.play-button-box { opacity: 0.4 }` rule, which
+                                      // dims the whole circle + triangle together.
+                                      if (!isLoading)
+                                        GestureDetector(
+                                          behavior: HitTestBehavior.opaque,
+                                          onTap: widget.audioService.playMusic,
+                                          child: Opacity(
+                                            opacity: isPlaying ? 0 : 0.4,
+                                            child: Container(
+                                              width: 150,
+                                              height: 150,
+                                              decoration: BoxDecoration(
+                                                color: const Color(
+                                                  0xFF10191A,
+                                                ).withOpacity(0.593),
+                                                shape: BoxShape.circle,
+                                              ),
+                                              alignment: Alignment.center,
+                                              child: Padding(
+                                                padding: const EdgeInsets.only(
+                                                  left: 6,
+                                                ),
+                                                child: _RightTriangle(
+                                                  width: 28,
+                                                  height: 38,
+                                                  color: const Color(
+                                                    0xFF52DCFF,
+                                                  ).withOpacity(0.7),
+                                                ),
                                               ),
                                             ),
                                           ),
                                         ),
                                     ],
                                   ),
-                                ),
                                 const SizedBox(height: 16),
 
                                 // Seek Slider
@@ -406,56 +525,89 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                   ),
                                 ),
 
-                                // Track Metadata & Time
-                                Padding(
-                                  padding: const EdgeInsets.symmetric(horizontal: 8.0),
-                                  child: Row(
-                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                    children: [
-                                      // Title & Artist
-                                      Expanded(
-                                        child: Column(
-                                          crossAxisAlignment: CrossAxisAlignment.start,
-                                          children: [
-                                            Text(
-                                              activeTrack?.title ?? "Dance Baby Radio",
-                                              style: const TextStyle(
-                                                color: Color(0xFF23C1D2),
-                                                fontSize: 12,
-                                                fontWeight: FontWeight.bold,
-                                              ),
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
+                                // Mobile frontend keeps metadata collapsed on
+                                // first render (`max-h-0`) and slides it open
+                                // when the player body is tapped.
+                                ClipRect(
+                                  child: AnimatedSize(
+                                    duration: const Duration(seconds: 1),
+                                    curve: Curves.easeInOut,
+                                    alignment: Alignment.topCenter,
+                                    child: _showControls
+                                        ? Padding(
+                                            padding: const EdgeInsets.only(
+                                              left: 8,
+                                              right: 8,
+                                              top: 8,
                                             ),
-                                            Text(
-                                              activeTrack?.artist ?? "",
-                                              style: TextStyle(
-                                                color: const Color(0xFF23C1D2).withOpacity(0.7),
-                                                fontSize: 10,
-                                              ),
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
+                                            child: Row(
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.start,
+                                              mainAxisAlignment:
+                                                  MainAxisAlignment.spaceBetween,
+                                              children: [
+                                                Expanded(
+                                                  child: Column(
+                                                    crossAxisAlignment:
+                                                        CrossAxisAlignment.start,
+                                                    children: [
+                                                      Text(
+                                                        activeTrack?.title ??
+                                                            'Dance Baby Radio',
+                                                        style: const TextStyle(
+                                                          color:
+                                                              Color(0xFF23C1D2),
+                                                          fontSize: 12,
+                                                          fontWeight:
+                                                              FontWeight.bold,
+                                                        ),
+                                                        maxLines: 1,
+                                                        overflow: TextOverflow
+                                                            .ellipsis,
+                                                      ),
+                                                      Text(
+                                                        activeTrack?.artist ??
+                                                            '',
+                                                        style: TextStyle(
+                                                          color: const Color(
+                                                            0xFF23C1D2,
+                                                          ).withOpacity(0.7),
+                                                          fontSize: 10,
+                                                        ),
+                                                        maxLines: 1,
+                                                        overflow: TextOverflow
+                                                            .ellipsis,
+                                                      ),
+                                                    ],
+                                                  ),
+                                                ),
+                                                const SizedBox(width: 8),
+                                                Text(
+                                                  '${_formatDuration(currentTime)} / '
+                                                  '${_formatDuration(duration)}',
+                                                  style: TextStyle(
+                                                    color: Colors.white
+                                                        .withOpacity(0.6),
+                                                    fontSize: 9,
+                                                  ),
+                                                ),
+                                              ],
                                             ),
-                                          ],
-                                        ),
-                                      ),
-                                      // Playback Time
-                                      Text(
-                                        "${_formatDuration(currentTime)} / ${_formatDuration(duration)}",
-                                        style: TextStyle(
-                                          color: Colors.white.withOpacity(0.6),
-                                          fontSize: 10,
-                                        ),
-                                      ),
-                                    ],
+                                          )
+                                        : const SizedBox(
+                                            width: double.infinity,
+                                            height: 0,
+                                          ),
                                   ),
                                 ),
                               ],
+                            ),
                             ),
                           ),
                         ),
                       ],
                     ),
+                  ),
                   ),
                 ),
 
@@ -475,6 +627,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 ),
 
                 // 7. Next Button (Bottom Right)
+                // Group-opacity 0.6 matches the frontend's
+                // `.next-button-box { opacity: .6 }` rule.
                 Positioned(
                   bottom: 27 + MediaQuery.of(context).padding.bottom,
                   right: 20,
@@ -483,42 +637,42 @@ class _PlayerScreenState extends State<PlayerScreen> {
                       _closeGenreMenu();
                       widget.audioService.playNextMusic();
                     },
-                    child: Container(
-                      width: 83,
-                      height: 81,
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF10191A).withOpacity(0.6),
-                        shape: BoxShape.circle,
-                      ),
-                      alignment: Alignment.center,
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Container(
-                            width: 0,
-                            height: 0,
-                            margin: const EdgeInsets.only(left: 3),
-                            decoration: const BoxDecoration(
-                              border: Border(
-                                top: BorderSide(color: Colors.transparent, width: 8),
-                                bottom: BorderSide(color: Colors.transparent, width: 8),
-                                left: BorderSide(color: Color(0xFF52DCFF), width: 12),
-                              ),
-                            ),
+                    child: Opacity(
+                      opacity: 0.6,
+                      child: Container(
+                        width: 83,
+                        height: 81,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF10191A).withOpacity(0.592),
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: const Color(0xFF003E47),
+                            width: 1,
                           ),
-                          Container(
-                            width: 0,
-                            height: 0,
-                            margin: const EdgeInsets.only(left: 3),
-                            decoration: const BoxDecoration(
-                              border: Border(
-                                top: BorderSide(color: Colors.transparent, width: 8),
-                                bottom: BorderSide(color: Colors.transparent, width: 8),
-                                left: BorderSide(color: Color(0xFF52DCFF), width: 12),
+                        ),
+                        alignment: Alignment.center,
+                        child: Padding(
+                          // Nudge right to visually center the pair of
+                          // right-pointing "skip" triangles in the circle.
+                          padding: const EdgeInsets.only(left: 3),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              _RightTriangle(
+                                width: 12,
+                                height: 16,
+                                color: const Color(0xFF52DCFF).withOpacity(0.7),
                               ),
-                            ),
+                              const SizedBox(width: 3),
+                              _RightTriangle(
+                                width: 12,
+                                height: 16,
+                                color: const Color(0xFF52DCFF).withOpacity(0.7),
+                              ),
+                            ],
                           ),
-                        ],
+                        ),
                       ),
                     ),
                   ),
@@ -527,7 +681,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
             );
           },
         ),
-      ),
     );
   }
 }
