@@ -43,17 +43,18 @@ class SupabaseService {
     required List<String> genreFilters,
     Music? excludeTrack,
   }) async {
-    final selected = await getRandomTrack(genreFilters);
-    if (selected == null) return null;
-
-    if (excludeTrack != null && selected.id == excludeTrack.id) {
-      final retrySelected = await getRandomTrack(genreFilters);
-      if (retrySelected != null) {
-        return retrySelected;
+    // Random SQL selection can legitimately return the excluded song more
+    // than once. Retry a few times and never report that duplicate as a valid
+    // replacement for the other player.
+    for (var attempt = 0; attempt < 5; attempt++) {
+      final selected = await getRandomTrack(genreFilters);
+      if (selected == null) return null;
+      if (excludeTrack == null || selected.id != excludeTrack.id) {
+        return selected;
       }
     }
 
-    return selected;
+    return null;
   }
 
   /// Updates track details (e.g. marking it inactive on error)

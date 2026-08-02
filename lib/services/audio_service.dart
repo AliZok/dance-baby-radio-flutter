@@ -24,6 +24,7 @@ class AudioService extends ChangeNotifier {
   bool _isLoading = true;
   bool _isAudioReady = false;
   bool _isRepeat = false;
+  bool _isTransitioning = false;
   double _volume = 1.0; // 0.0 to 1.0
 
   Duration _currentTime = Duration.zero;
@@ -281,7 +282,10 @@ class AudioService extends ChangeNotifier {
 
     try {
       final player = activePlayer;
-      await player.play();
+      // just_audio's play() future completes when playback later stops; do
+      // not await it or initialization/transition logic would remain blocked
+      // for the entire duration of the song.
+      unawaited(player.play());
       _isPlaying = true;
       _isLoading = false;
       notifyListeners();
@@ -304,49 +308,60 @@ class AudioService extends ChangeNotifier {
   }
 
   Future<void> playNextMusic() async {
+    // A completion event and a user tap can arrive in the same frame. Only one
+    // transition may own the two players at a time; otherwise both can start
+    // playing or the not-yet-refilled player can replay the previous song.
+    if (_isTransitioning) return;
+    _isTransitioning = true;
+
     _isLoading = true;
     notifyListeners();
 
-    // Pause current player and reset its position
-    await activePlayer.pause();
-    await activePlayer.seek(Duration.zero);
+    try {
+      // Always silence both players before switching. This also recovers from
+      // any stale play() call left by a previous interrupted transition.
+      await Future.wait([
+        _playerPrimary.pause(),
+        _playerSupport.pause(),
+      ]);
 
-    // Save current track to playback history
-    final currentTrack = activeTrack;
-    if (currentTrack != null) {
-      if (_playbackHistory.isEmpty || _playbackHistory.last.id != currentTrack.id) {
-        _playbackHistory.add(currentTrack);
-        if (_playbackHistory.length > 20) {
-          _playbackHistory.removeAt(0);
+      // Save current track to playback history
+      final currentTrack = activeTrack;
+      if (currentTrack != null) {
+        if (_playbackHistory.isEmpty ||
+            _playbackHistory.last.id != currentTrack.id) {
+          _playbackHistory.add(currentTrack);
+          if (_playbackHistory.length > 20) {
+            _playbackHistory.removeAt(0);
+          }
         }
       }
-    }
 
-    // Toggle active player
-    _originAudio = !_originAudio;
-    _currentTime = Duration.zero;
-    _duration = activePlayer.duration ?? Duration.zero;
-    notifyListeners();
+      // Toggle to the already-preloaded player.
+      _originAudio = !_originAudio;
+      _currentTime = Duration.zero;
+      await activePlayer.seek(Duration.zero);
+      _duration = activePlayer.duration ?? Duration.zero;
+      notifyListeners();
 
-    // Start playing the preloaded track on the now-active player
-    try {
-      await activePlayer.play();
+      unawaited(activePlayer.play());
       _isPlaying = true;
       _isLoading = false;
       notifyListeners();
+
+      // Refill and preload the now-inactive player before releasing the
+      // transition lock. A second Next can therefore never reactivate stale
+      // audio from the previous song.
+      await _fetchReplacementForInactivePlayer();
     } catch (e) {
       print('Error playing preloaded track: $e');
       _isLoading = false;
+      _isPlaying = activePlayer.playing;
       notifyListeners();
       _handleTrackError(activeTrack);
-      // Try to skip to next
-      _originAudio = !_originAudio;
-      playNextMusic();
-      return;
+    } finally {
+      _isTransitioning = false;
     }
-
-    // Fetch replacement for the now-inactive player in the background
-    _fetchReplacementForInactivePlayer();
   }
 
   Future<void> _fetchReplacementForInactivePlayer() async {
@@ -355,6 +370,7 @@ class AudioService extends ChangeNotifier {
       genreFilters: filters,
       excludeTrack: activeTrack,
     );
+    if (replacement == null) return;
 
     if (_originAudio) {
       // Primary player is now inactive, replace its track
@@ -403,7 +419,7 @@ class AudioService extends ChangeNotifier {
     notifyListeners();
 
     try {
-      await activePlayer.play();
+      unawaited(activePlayer.play());
       _isPlaying = true;
       _isLoading = false;
       notifyListeners();

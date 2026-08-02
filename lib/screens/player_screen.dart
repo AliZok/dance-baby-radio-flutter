@@ -69,6 +69,7 @@ class PlayerScreen extends StatefulWidget {
 class _PlayerScreenState extends State<PlayerScreen> {
   bool _showControls = false; // In mobile front-end, controls are hidden by default
   bool _isGenreOpen = false; // Manages the open/close state of the genre selector
+  bool _isNextPressed = false;
 
   String _formatDuration(Duration duration) {
     final minutes = duration.inMinutes;
@@ -336,7 +337,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                     height: 40,
                                     padding: const EdgeInsets.symmetric(horizontal: 6),
                                     decoration: BoxDecoration(
-                                      color: const Color(0xFF10191A).withOpacity(0.593),
+                                      color:
+                                          const Color(0xFF10191A).withOpacity(0.78),
                                       borderRadius: BorderRadius.circular(30),
                                     ),
                                     alignment: Alignment.center,
@@ -364,12 +366,27 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                   GestureDetector(
                                     onTap: widget.audioService.toggleRepeat,
                                     behavior: HitTestBehavior.opaque,
-                                    child: Container(
+                                    child: AnimatedContainer(
+                                      duration:
+                                          const Duration(milliseconds: 180),
                                       width: 40,
                                       height: 40,
                                       decoration: BoxDecoration(
-                                        color: const Color(0xFF10191A).withOpacity(0.593),
+                                        color: const Color(
+                                          0xFF10191A,
+                                        ).withOpacity(0.78),
                                         borderRadius: BorderRadius.circular(30),
+                                        boxShadow: isRepeat
+                                            ? [
+                                                BoxShadow(
+                                                  color: const Color(
+                                                    0xFF52DCFF,
+                                                  ).withOpacity(0.7),
+                                                  blurRadius: 14,
+                                                  spreadRadius: 1,
+                                                ),
+                                              ]
+                                            : null,
                                       ),
                                       alignment: Alignment.center,
                                       child: _buildRepeatIcon(isRepeat),
@@ -476,7 +493,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                               decoration: BoxDecoration(
                                                 color: const Color(
                                                   0xFF10191A,
-                                                ).withOpacity(0.593),
+                                                ).withOpacity(0.78),
                                                 shape: BoxShape.circle,
                                               ),
                                               alignment: Alignment.center,
@@ -633,22 +650,35 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   bottom: 27 + MediaQuery.of(context).padding.bottom,
                   right: 20,
                   child: GestureDetector(
+                    onTapDown: (_) => setState(() => _isNextPressed = true),
+                    onTapUp: (_) => setState(() => _isNextPressed = false),
+                    onTapCancel: () =>
+                        setState(() => _isNextPressed = false),
                     onTap: () {
                       _closeGenreMenu();
                       widget.audioService.playNextMusic();
                     },
-                    child: Opacity(
-                      opacity: 0.6,
-                      child: Container(
+                    child: AnimatedOpacity(
+                      duration: const Duration(milliseconds: 180),
+                      opacity: _isNextPressed ? 1 : 0.7,
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 180),
                         width: 83,
                         height: 81,
                         decoration: BoxDecoration(
-                          color: const Color(0xFF10191A).withOpacity(0.592),
+                          color: const Color(0xFF10191A).withOpacity(0.78),
                           shape: BoxShape.circle,
-                          border: Border.all(
-                            color: const Color(0xFF003E47),
-                            width: 1,
-                          ),
+                          boxShadow: _isNextPressed
+                              ? [
+                                  BoxShadow(
+                                    color: const Color(
+                                      0xFF52DCFF,
+                                    ).withOpacity(0.75),
+                                    blurRadius: 18,
+                                    spreadRadius: 2,
+                                  ),
+                                ]
+                              : null,
                         ),
                         alignment: Alignment.center,
                         child: Padding(
@@ -662,13 +692,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
                               _RightTriangle(
                                 width: 12,
                                 height: 16,
-                                color: const Color(0xFF52DCFF).withOpacity(0.7),
+                                color: const Color(0xFF52DCFF).withOpacity(
+                                  _isNextPressed ? 1 : 0.7,
+                                ),
                               ),
                               const SizedBox(width: 3),
                               _RightTriangle(
                                 width: 12,
                                 height: 16,
-                                color: const Color(0xFF52DCFF).withOpacity(0.7),
+                                color: const Color(0xFF52DCFF).withOpacity(
+                                  _isNextPressed ? 1 : 0.7,
+                                ),
                               ),
                             ],
                           ),

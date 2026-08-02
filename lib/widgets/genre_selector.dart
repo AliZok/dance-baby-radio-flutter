@@ -96,7 +96,7 @@ class _GenreSelectorState extends State<GenreSelector> {
           width: 80,
           height: 80,
           decoration: BoxDecoration(
-            color: const Color(0xFF10191A).withOpacity(0.593),
+            color: const Color(0xFF10191A).withOpacity(0.78),
             shape: BoxShape.circle,
           ),
           alignment: Alignment.center,

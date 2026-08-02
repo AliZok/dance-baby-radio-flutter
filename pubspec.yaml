@@ -1,6 +1,6 @@
 name: dance_baby_radio_flutter
 description: A Flutter Android application for Dance Baby Radio, matching the Nuxt 3 frontend styles and flows.
-version: 1.0.6+7
+version: 1.0.7+8
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
