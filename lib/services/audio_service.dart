@@ -1,15 +1,18 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 import 'package:audio_session/audio_session.dart';
 import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/music.dart';
 import '../models/genre.dart';
+import '../models/playlist.dart';
 import 'supabase_service.dart';
 
 class AudioService extends ChangeNotifier {
   final SupabaseService _supabaseService = SupabaseService();
+  final _random = Random();
   
   // Dual audio players for gapless/seamless transition
   late AudioPlayer _playerPrimary;
@@ -25,7 +28,28 @@ class AudioService extends ChangeNotifier {
   bool _isAudioReady = false;
   bool _isRepeat = false;
   bool _isTransitioning = false;
+  /// True when a Next arrived while a switch was already in progress — run
+  /// one more transition after the current one finishes (do not drop taps).
+  bool _queuedNext = false;
+  /// In-flight preload of the inactive player after a Next. The next switch
+  /// awaits this so we never flip onto a stale track, but we do not hold the
+  /// transition lock for the whole network round-trip (that made Next feel
+  /// broken and required multiple taps).
+  Future<void>? _refillFuture;
+  /// Bumped whenever a new inactive refill starts so an older in-flight
+  /// request cannot overwrite a fresher genre-filter result.
+  int _refillGeneration = 0;
+  /// While true / until this timestamp, ignore ProcessingState.completed so a
+  /// timeline scrub cannot race into playNextMusic (same class of bug as the
+  /// Nuxt "don't sync both players on seek" fix).
+  DateTime? _ignoreCompletedUntil;
+  bool _hasStarted = false;
   double _volume = 1.0; // 0.0 to 1.0
+  /// Prevents stacked error→skip handlers from fighting over the dual players.
+  bool _handlingPlaybackError = false;
+  /// Caps auto-skip storms when several bad URLs land in a row.
+  int _consecutiveLoadFailures = 0;
+  static const int _maxConsecutiveLoadFailures = 8;
 
   Duration _currentTime = Duration.zero;
   Duration _duration = Duration.zero;
@@ -33,14 +57,20 @@ class AudioService extends ChangeNotifier {
   final List<Music> _playbackHistory = [];
   List<Genre> _genres = [];
 
+  // Playlist-as-radio-source mode (matches Nuxt activePlaybackPlaylist)
+  Playlist? _activePlaybackPlaylist;
+  List<Music> _activePlaylistTracks = [];
+
   // Subscriptions to clean up
   StreamSubscription? _primaryPositionSub;
   StreamSubscription? _primaryDurationSub;
   StreamSubscription? _primaryStateSub;
+  StreamSubscription? _primaryErrorSub;
   
   StreamSubscription? _supportPositionSub;
   StreamSubscription? _supportDurationSub;
   StreamSubscription? _supportStateSub;
+  StreamSubscription? _supportErrorSub;
 
   // Getters
   Music? get currentOriginTrack => _currentOriginTrack;
@@ -55,6 +85,7 @@ class AudioService extends ChangeNotifier {
   bool get isLoading => _isLoading;
   bool get isAudioReady => _isAudioReady;
   bool get isRepeat => _isRepeat;
+  bool get hasStarted => _hasStarted;
   double get volume => _volume;
 
   Duration get currentTime => _currentTime;
@@ -64,9 +95,15 @@ class AudioService extends ChangeNotifier {
   List<String> get activeGenreFilters =>
       _genres.where((g) => g.active).map((g) => g.genre).toList();
 
+  Playlist? get activePlaybackPlaylist => _activePlaybackPlaylist;
+  bool get isPlaylistMode => _activePlaybackPlaylist != null;
+
   AudioService() {
-    _playerPrimary = AudioPlayer();
-    _playerSupport = AudioPlayer();
+    // Dual ExoPlayers share one Android audio session. Interruptions from the
+    // inactive preload must not pause/stop the active track (that was causing
+    // mid-song auto-skips when setUrl ran on the other player).
+    _playerPrimary = AudioPlayer(handleInterruptions: false);
+    _playerSupport = AudioPlayer(handleInterruptions: false);
     _initGenres();
     _setupListeners();
   }
@@ -103,18 +140,52 @@ class AudioService extends ChangeNotifier {
       }
     }
 
-    // 2. Fetch initial tracks in parallel
+    // Fetch + preload tracks, then autoplay. Native apps do not need a
+    // Let's GO / Welcome gate (unlike the web autoplay policy).
     await _loadInitialTracks();
-
-    // 3. Start playing automatically as soon as the app is ready
     if (_isAudioReady) {
-      resumeAudio();
-    } else {
-      // If not ready, listen to player state or just force play when ready
-      _preloadPrimary().then((_) {
-        resumeAudio();
-      });
+      await startPlayback();
     }
+  }
+
+  /// Starts radio playback once tracks are ready (also used after playlist mode).
+  Future<void> startPlayback() async {
+    if (_hasStarted) {
+      if (!_isPlaying) await resumeAudio();
+      return;
+    }
+    _hasStarted = true;
+    notifyListeners();
+
+    if (!_isAudioReady) {
+      await _loadInitialTracks();
+    }
+    if (_isAudioReady) {
+      await resumeAudio();
+    }
+  }
+
+  Music? _pickTrackFromActivePlaylist(Music? excludeTrack) {
+    final playable =
+        _activePlaylistTracks.where((t) => t.audio.isNotEmpty).toList();
+    if (playable.isEmpty) return null;
+
+    final candidates = excludeTrack == null
+        ? playable
+        : playable.where((t) => t.id != excludeTrack.id).toList();
+
+    final pool = candidates.isNotEmpty ? candidates : playable;
+    return pool[_random.nextInt(pool.length)];
+  }
+
+  Future<Music?> _fetchNextTrack({Music? excludeTrack}) async {
+    if (_activePlaybackPlaylist != null && _activePlaylistTracks.isNotEmpty) {
+      return _pickTrackFromActivePlaylist(excludeTrack);
+    }
+    return _supabaseService.getRandomActiveMusic(
+      genreFilters: activeGenreFilters,
+      excludeTrack: excludeTrack,
+    );
   }
 
   Future<void> _loadInitialTracks() async {
@@ -123,12 +194,10 @@ class AudioService extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final filters = activeGenreFilters;
-      
       // Fetch both in parallel
       final results = await Future.wait([
-        _supabaseService.getRandomActiveMusic(genreFilters: filters),
-        _supabaseService.getRandomActiveMusic(genreFilters: filters),
+        _fetchNextTrack(),
+        _fetchNextTrack(),
       ]);
 
       _currentOriginTrack = results[0];
@@ -138,8 +207,7 @@ class AudioService extends ChangeNotifier {
       if (_currentOriginTrack != null &&
           _currentSupportTrack != null &&
           _currentOriginTrack!.id == _currentSupportTrack!.id) {
-        _currentSupportTrack = await _supabaseService.getRandomActiveMusic(
-          genreFilters: filters,
+        _currentSupportTrack = await _fetchNextTrack(
           excludeTrack: _currentOriginTrack,
         );
       }
@@ -158,24 +226,72 @@ class AudioService extends ChangeNotifier {
     }
   }
 
+  /// Enter playlist-as-source mode (or exit if same playlist is toggled).
+  Future<void> playFromPlaylist(Playlist playlist, List<Music> tracks) async {
+    final playable = tracks.where((t) => t.audio.isNotEmpty).toList();
+    if (playable.isEmpty) {
+      throw Exception('Empty playlist');
+    }
+
+    _activePlaybackPlaylist = playlist;
+    _activePlaylistTracks = playable;
+    _originAudio = false;
+    notifyListeners();
+
+    await _loadInitialTracks();
+    _hasStarted = true;
+    await resumeAudio();
+  }
+
+  /// Exit playlist mode and return to main radio shuffle.
+  Future<void> returnToMainRandom() async {
+    _activePlaybackPlaylist = null;
+    _activePlaylistTracks = [];
+    _originAudio = false;
+    notifyListeners();
+
+    await _loadInitialTracks();
+    _hasStarted = true;
+    await resumeAudio();
+  }
+
+  void clearPlaylistModeOnLogout() {
+    _activePlaybackPlaylist = null;
+    _activePlaylistTracks = [];
+    notifyListeners();
+  }
+
   Future<void> _preloadPrimary() async {
-    if (_currentOriginTrack?.audio != null && _currentOriginTrack!.audio.isNotEmpty) {
+    if (_currentOriginTrack?.audio != null &&
+        _currentOriginTrack!.audio.isNotEmpty) {
       try {
         await _playerPrimary.setUrl(_currentOriginTrack!.audio);
+        // Preload only — never leave the buffer playing.
+        await _playerPrimary.pause();
+        await _playerPrimary.seek(Duration.zero);
       } catch (e) {
         print('Error preloading primary player: $e');
-        _handleTrackError(_currentOriginTrack);
+        await _replaceFailedSide(
+          failed: _currentOriginTrack,
+          isOriginSide: true,
+        );
       }
     }
   }
 
   Future<void> _preloadSupport() async {
-    if (_currentSupportTrack?.audio != null && _currentSupportTrack!.audio.isNotEmpty) {
+    if (_currentSupportTrack?.audio != null &&
+        _currentSupportTrack!.audio.isNotEmpty) {
       try {
         await _playerSupport.setUrl(_currentSupportTrack!.audio);
+        await _playerSupport.pause();
+        await _playerSupport.seek(Duration.zero);
       } catch (e) {
         print('Error preloading support player: $e');
-        _handleTrackError(_currentSupportTrack);
+        await _replaceFailedSide(
+          failed: _currentSupportTrack,
+          isOriginSide: false,
+        );
       }
     }
   }
@@ -197,17 +313,30 @@ class AudioService extends ChangeNotifier {
     });
 
     _primaryStateSub = _playerPrimary.playerStateStream.listen((state) {
-      if (!_originAudio) {
-        _isPlaying = state.playing;
-        _isLoading = state.processingState == ProcessingState.buffering ||
-                     state.processingState == ProcessingState.loading;
-        
-        if (state.processingState == ProcessingState.completed) {
-          _nextOrRepeat();
-        }
-        notifyListeners();
+      // Nuxt: onOriginEnded only fires next when primary is the active side.
+      if (_originAudio) return;
+
+      _isPlaying = state.playing;
+      _isLoading = state.processingState == ProcessingState.buffering ||
+          state.processingState == ProcessingState.loading;
+
+      if (state.processingState == ProcessingState.completed) {
+        _handleTrackCompleted();
       }
+      notifyListeners();
     });
+
+    // Async load/play failures never reach the unawaited play() caller —
+    // listen here so a dead URL still advances and auto-plays the next track.
+    _primaryErrorSub = _playerPrimary.playbackEventStream.listen(
+      (_) {},
+      onError: (Object e, StackTrace st) {
+        if (_originAudio) return; // inactive side — ignore
+        if (_isTransitioning || _handlingPlaybackError) return;
+        print('Primary playback error: $e');
+        unawaited(_onActiveTrackFailed(_currentOriginTrack));
+      },
+    );
 
     // Support Player Listeners
     _supportPositionSub = _playerSupport.positionStream.listen((pos) {
@@ -225,40 +354,204 @@ class AudioService extends ChangeNotifier {
     });
 
     _supportStateSub = _playerSupport.playerStateStream.listen((state) {
-      if (_originAudio) {
-        _isPlaying = state.playing;
-        _isLoading = state.processingState == ProcessingState.buffering ||
-                     state.processingState == ProcessingState.loading;
-        
-        if (state.processingState == ProcessingState.completed) {
-          _nextOrRepeat();
-        }
-        notifyListeners();
-      }
-    });
-  }
+      // Nuxt: onSupportEnded only when support is active.
+      if (!_originAudio) return;
 
-  void _handleTrackError(Music? track) async {
-    if (track != null) {
-      print('Track failed to load/play: ${track.title} (ID: ${track.id})');
-      // Mark track as inactive in Supabase
-      await _supabaseService.updateMusicById(track.id, {'is_active': false});
-      
-      // Load a replacement track
-      final filters = activeGenreFilters;
-      final replacement = await _supabaseService.getRandomActiveMusic(
-        genreFilters: filters,
-        excludeTrack: _originAudio ? _currentSupportTrack : _currentOriginTrack,
-      );
+      _isPlaying = state.playing;
+      _isLoading = state.processingState == ProcessingState.buffering ||
+          state.processingState == ProcessingState.loading;
 
-      if (_originAudio) {
-        _currentSupportTrack = replacement;
-        await _preloadSupport();
-      } else {
-        _currentOriginTrack = replacement;
-        await _preloadPrimary();
+      if (state.processingState == ProcessingState.completed) {
+        _handleTrackCompleted();
       }
       notifyListeners();
+    });
+
+    _supportErrorSub = _playerSupport.playbackEventStream.listen(
+      (_) {},
+      onError: (Object e, StackTrace st) {
+        if (!_originAudio) return; // inactive side — ignore
+        if (_isTransitioning || _handlingPlaybackError) return;
+        print('Support playback error: $e');
+        unawaited(_onActiveTrackFailed(_currentSupportTrack));
+      },
+    );
+  }
+
+  /// Advance only on a real end-of-track (Nuxt `ended` on the active element).
+  void _handleTrackCompleted() {
+    if (_isTransitioning) return;
+
+    final ignoreUntil = _ignoreCompletedUntil;
+    if (ignoreUntil != null && DateTime.now().isBefore(ignoreUntil)) {
+      return;
+    }
+
+    // Unknown / zero duration → never treat as a real end (spurious completed
+    // right after a switch used to auto-skip the freshly started track).
+    if (_duration <= Duration.zero) return;
+
+    // Still clearly mid-track → stale/spurious completed (e.g. after seek).
+    if (_duration - _currentTime > const Duration(milliseconds: 750)) {
+      return;
+    }
+
+    _consecutiveLoadFailures = 0;
+    _nextOrRepeat();
+  }
+
+  /// Replace a broken buffer on a specific side (active or inactive). Does not
+  /// start playback — callers that need sound must play afterwards.
+  Future<void> _replaceFailedSide({
+    required Music? failed,
+    required bool isOriginSide,
+    int attempt = 0,
+  }) async {
+    if (failed != null) {
+      print(
+        'Track failed to load/play: ${failed.title} (ID: ${failed.id}) '
+        'side=${isOriginSide ? 'origin' : 'support'}',
+      );
+      if (!isPlaylistMode) {
+        try {
+          await _supabaseService.updateMusicById(
+            failed.id,
+            {'is_active': false},
+          );
+        } catch (e) {
+          print('Failed to mark track inactive: $e');
+        }
+      }
+    }
+
+    final exclude = isOriginSide ? _currentSupportTrack : _currentOriginTrack;
+    final replacement = await _fetchNextTrack(excludeTrack: exclude);
+    if (replacement == null) return;
+
+    if (isOriginSide) {
+      _currentOriginTrack = replacement;
+      try {
+        await _playerPrimary.setUrl(replacement.audio);
+        await _playerPrimary.pause();
+        await _playerPrimary.seek(Duration.zero);
+      } catch (e) {
+        print('Replacement origin preload failed: $e');
+        if (attempt < 3) {
+          await _replaceFailedSide(
+            failed: replacement,
+            isOriginSide: true,
+            attempt: attempt + 1,
+          );
+        }
+        return;
+      }
+    } else {
+      _currentSupportTrack = replacement;
+      try {
+        await _playerSupport.setUrl(replacement.audio);
+        await _playerSupport.pause();
+        await _playerSupport.seek(Duration.zero);
+      } catch (e) {
+        print('Replacement support preload failed: $e');
+        if (attempt < 3) {
+          await _replaceFailedSide(
+            failed: replacement,
+            isOriginSide: false,
+            attempt: attempt + 1,
+          );
+        }
+        return;
+      }
+    }
+    notifyListeners();
+  }
+
+  /// Active track cannot play (Nuxt playBetter catch): mark dead, flip to the
+  /// already-preloaded next buffer, and auto-play it.
+  Future<void> _onActiveTrackFailed(Music? failed) async {
+    if (_handlingPlaybackError || _isTransitioning) return;
+    if (_consecutiveLoadFailures >= _maxConsecutiveLoadFailures) {
+      print('Too many consecutive load failures — stopping auto-skip');
+      _isPlaying = false;
+      _isLoading = false;
+      notifyListeners();
+      return;
+    }
+
+    _handlingPlaybackError = true;
+    _consecutiveLoadFailures++;
+    try {
+      if (failed != null && !isPlaylistMode) {
+        try {
+          await _supabaseService.updateMusicById(
+            failed.id,
+            {'is_active': false},
+          );
+        } catch (e) {
+          print('Failed to mark track inactive: $e');
+        }
+      }
+    } finally {
+      // Release before playNextMusic so another dead URL can retry (capped by
+      // _consecutiveLoadFailures). Holding the flag across that call swallowed
+      // the follow-up skip and left playback paused on the replacement.
+      _handlingPlaybackError = false;
+    }
+
+    // Flip + play the other buffer (same idea as Nuxt flipping originAudio
+    // and re-entering playBetter). playNextMusic also refills the dead side.
+    await playNextMusic(fromUser: false);
+  }
+
+  /// Starts playback on the active player and waits until it is actually
+  /// playing (or errors / times out). just_audio's play() future completes
+  /// when playback later *stops*, so we must not await it directly.
+  Future<void> _playActiveAndConfirm({
+    Duration timeout = const Duration(seconds: 12),
+  }) async {
+    final player = activePlayer;
+    final completer = Completer<void>();
+    StreamSubscription<PlayerState>? stateSub;
+    StreamSubscription<PlaybackEvent>? errorSub;
+
+    void succeed() {
+      if (!completer.isCompleted) completer.complete();
+    }
+
+    void fail(Object error) {
+      if (!completer.isCompleted) completer.completeError(error);
+    }
+
+    stateSub = player.playerStateStream.listen((state) {
+      if (state.playing &&
+          (state.processingState == ProcessingState.ready ||
+              state.processingState == ProcessingState.buffering)) {
+        succeed();
+      }
+    });
+    errorSub = player.playbackEventStream.listen(
+      (_) {},
+      onError: (Object e, StackTrace st) => fail(e),
+    );
+
+    try {
+      if (player.playing &&
+          (player.processingState == ProcessingState.ready ||
+              player.processingState == ProcessingState.buffering)) {
+        succeed();
+      } else {
+        unawaited(player.play().catchError((Object e) {
+          fail(e);
+        }));
+      }
+      await completer.future.timeout(timeout);
+      _consecutiveLoadFailures = 0;
+      _isPlaying = true;
+      _isLoading = false;
+      notifyListeners();
+    } finally {
+      await stateSub.cancel();
+      await errorSub.cancel();
     }
   }
 
@@ -276,25 +569,30 @@ class AudioService extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Hard-stop both players and clear playing state. Used when tearing down
+  /// the OS media session (app swiped away / notification dismissed) so
+  /// playback and system controls do not linger after the app is closed.
+  Future<void> stopAudio() async {
+    await Future.wait([
+      _playerPrimary.stop(),
+      _playerSupport.stop(),
+    ]);
+    _isPlaying = false;
+    _isLoading = false;
+    notifyListeners();
+  }
+
   Future<void> resumeAudio() async {
     _isLoading = true;
     notifyListeners();
 
     try {
-      final player = activePlayer;
-      // just_audio's play() future completes when playback later stops; do
-      // not await it or initialization/transition logic would remain blocked
-      // for the entire duration of the song.
-      unawaited(player.play());
-      _isPlaying = true;
-      _isLoading = false;
-      notifyListeners();
+      await _playActiveAndConfirm();
     } catch (e) {
       print('resumeAudio failed: $e');
       _isLoading = false;
       notifyListeners();
-      _handleTrackError(activeTrack);
-      playNextMusic();
+      await _onActiveTrackFailed(activeTrack);
     }
   }
 
@@ -303,29 +601,49 @@ class AudioService extends ChangeNotifier {
       seek(Duration.zero);
       resumeAudio();
     } else {
-      playNextMusic();
+      // Auto-advance must never queue a second skip during a transition —
+      // that was flipping mid-song right after Next.
+      playNextMusic(fromUser: false);
     }
   }
 
-  Future<void> playNextMusic() async {
-    // A completion event and a user tap can arrive in the same frame. Only one
-    // transition may own the two players at a time; otherwise both can start
-    // playing or the not-yet-refilled player can replay the previous song.
-    if (_isTransitioning) return;
+  /// Flip to the already-preloaded buffer (Nuxt `playNextMusic` + `playBetter`).
+  ///
+  /// [fromUser] true for Next button / media controls — may queue one extra
+  /// tap. Automatic `ended`/`completed` never queues, so a double-fire cannot
+  /// skip two tracks in a row.
+  Future<void> playNextMusic({bool fromUser = true}) async {
+    if (_isTransitioning) {
+      if (fromUser) _queuedNext = true;
+      return;
+    }
     _isTransitioning = true;
+    // Suppress completed storms from pause / seek(0) / inactive setUrl.
+    _ignoreCompletedUntil =
+        DateTime.now().add(const Duration(milliseconds: 1500));
 
     _isLoading = true;
     notifyListeners();
 
+    var playFailed = false;
     try {
-      // Always silence both players before switching. This also recovers from
-      // any stale play() call left by a previous interrupted transition.
-      await Future.wait([
-        _playerPrimary.pause(),
-        _playerSupport.pause(),
-      ]);
+      // Finish any in-flight inactive preload before flipping so we never
+      // land on a half-replaced buffer.
+      final pendingRefill = _refillFuture;
+      if (pendingRefill != null) {
+        try {
+          await pendingRefill;
+        } catch (e) {
+          print('Pending inactive refill failed: $e');
+        }
+      }
 
-      // Save current track to playback history
+      // Nuxt pauseAudio(): pause ONLY the active element — not both. Pausing /
+      // reloading the inactive side while the new track plays was interrupting
+      // playback and triggering another skip mid-song.
+      final leaving = activePlayer;
+      await leaving.pause();
+
       final currentTrack = activeTrack;
       if (currentTrack != null) {
         if (_playbackHistory.isEmpty ||
@@ -337,50 +655,68 @@ class AudioService extends ChangeNotifier {
         }
       }
 
-      // Toggle to the already-preloaded player.
+      // Flip to the preloaded player (already setUrl'd in the background).
       _originAudio = !_originAudio;
       _currentTime = Duration.zero;
       await activePlayer.seek(Duration.zero);
       _duration = activePlayer.duration ?? Duration.zero;
       notifyListeners();
 
-      unawaited(activePlayer.play());
-      _isPlaying = true;
-      _isLoading = false;
-      notifyListeners();
-
-      // Refill and preload the now-inactive player before releasing the
-      // transition lock. A second Next can therefore never reactivate stale
-      // audio from the previous song.
-      await _fetchReplacementForInactivePlayer();
+      await _playActiveAndConfirm();
     } catch (e) {
       print('Error playing preloaded track: $e');
+      playFailed = true;
       _isLoading = false;
-      _isPlaying = activePlayer.playing;
+      _isPlaying = false;
       notifyListeners();
-      _handleTrackError(activeTrack);
     } finally {
       _isTransitioning = false;
     }
+
+    // Background-refill the side we just left (Nuxt watch(originAudio) /
+    // getRandomNumber*). Keep it paused — preload only.
+    _scheduleInactiveRefill();
+
+    if (_queuedNext) {
+      _queuedNext = false;
+      unawaited(playNextMusic(fromUser: true));
+      return;
+    }
+
+    // Bad URL after the flip: mark it dead and auto-play the *next* track
+    // (Nuxt playBetter catch → flip → playBetter again).
+    if (playFailed) {
+      await _onActiveTrackFailed(activeTrack);
+    }
   }
 
-  Future<void> _fetchReplacementForInactivePlayer() async {
-    final filters = activeGenreFilters;
-    final replacement = await _supabaseService.getRandomActiveMusic(
-      genreFilters: filters,
-      excludeTrack: activeTrack,
-    );
+  /// Starts a fresh inactive-side preload. Any previous in-flight refill is
+  /// ignored when it completes so genre-filter changes win the race.
+  void _scheduleInactiveRefill() {
+    final generation = ++_refillGeneration;
+    final refill = _fetchReplacementForInactivePlayer(generation);
+    _refillFuture = refill;
+    unawaited(refill.whenComplete(() {
+      if (identical(_refillFuture, refill)) {
+        _refillFuture = null;
+      }
+    }));
+  }
+
+  Future<void> _fetchReplacementForInactivePlayer(int generation) async {
+    final replacement = await _fetchNextTrack(excludeTrack: activeTrack);
+    if (generation != _refillGeneration) return;
     if (replacement == null) return;
 
+    // Load into the inactive player only. Never call play() here.
     if (_originAudio) {
-      // Primary player is now inactive, replace its track
       _currentOriginTrack = replacement;
       await _preloadPrimary();
     } else {
-      // Support player is now inactive, replace its track
       _currentSupportTrack = replacement;
       await _preloadSupport();
     }
+    if (generation != _refillGeneration) return;
     notifyListeners();
   }
 
@@ -419,23 +755,32 @@ class AudioService extends ChangeNotifier {
     notifyListeners();
 
     try {
-      unawaited(activePlayer.play());
-      _isPlaying = true;
-      _isLoading = false;
-      notifyListeners();
+      await _playActiveAndConfirm();
     } catch (e) {
       print('playPreviousMusic failed: $e');
       _isLoading = false;
       notifyListeners();
-      _handleTrackError(activeTrack);
-      playNextMusic();
+      await _onActiveTrackFailed(activeTrack);
     }
   }
 
   void seek(Duration position) {
-    activePlayer.seek(position);
-    _currentTime = position;
+    // Only the active player — seeking the inactive (often shorter) buffer to
+    // the same time can push it to `ended`/`completed` and skip the track.
+    var target = position.isNegative ? Duration.zero : position;
+
+    // Keep a small gap from the true end so dragging the slider to max does
+    // not fire ProcessingState.completed and jump to the next track.
+    if (_duration > const Duration(milliseconds: 500)) {
+      final maxPos = _duration - const Duration(milliseconds: 300);
+      if (target > maxPos) target = maxPos;
+    }
+
+    _ignoreCompletedUntil =
+        DateTime.now().add(const Duration(milliseconds: 600));
+    _currentTime = target;
     notifyListeners();
+    unawaited(activePlayer.seek(target));
   }
 
   void setVolume(double val) {
@@ -462,6 +807,7 @@ class AudioService extends ChangeNotifier {
   Future<void> toggleGenre(Genre genre) async {
     // Match the frontend exactly: every genre can independently be enabled or
     // disabled, including turning all filters off (which means "all genres").
+    final turningOff = genre.active;
     genre.active = !genre.active;
     notifyListeners();
 
@@ -469,6 +815,13 @@ class AudioService extends ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     final genresJson = jsonEncode(_genres.map((g) => g.toJson()).toList());
     await prefs.setString('myGenres', genresJson);
+
+    // The inactive player already holds the next track. If this genre was
+    // turned off, that buffer may still be from the disabled genre — refetch
+    // with the updated filters so Next respects the change.
+    if (turningOff && !isPlaylistMode) {
+      _scheduleInactiveRefill();
+    }
   }
 
   @override
@@ -476,9 +829,11 @@ class AudioService extends ChangeNotifier {
     _primaryPositionSub?.cancel();
     _primaryDurationSub?.cancel();
     _primaryStateSub?.cancel();
+    _primaryErrorSub?.cancel();
     _supportPositionSub?.cancel();
     _supportDurationSub?.cancel();
     _supportStateSub?.cancel();
+    _supportErrorSub?.cancel();
     
     _playerPrimary.dispose();
     _playerSupport.dispose();

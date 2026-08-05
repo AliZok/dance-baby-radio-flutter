@@ -20,12 +20,20 @@ class Music {
   });
 
   factory Music.fromJson(Map<String, dynamic> json) {
+    final idRaw = json['id'];
+    final id = idRaw is int ? idRaw : int.tryParse('$idRaw') ?? 0;
+
     return Music(
-      id: json['id'] as int,
+      id: id,
       title: json['title'] as String? ?? 'Unknown Title',
       artist: json['artist'] as String? ?? 'Unknown Artist',
-      cover: json['cover'] as String? ?? '',
-      audio: json['audio'] as String? ?? '',
+      // Match Nuxt normalizeTrack: cover || cover_url, audio || audio_url
+      cover: (json['cover'] as String?)?.isNotEmpty == true
+          ? json['cover'] as String
+          : (json['cover_url'] as String? ?? ''),
+      audio: (json['audio'] as String?)?.isNotEmpty == true
+          ? json['audio'] as String
+          : (json['audio_url'] as String? ?? ''),
       genre: json['genre'] as String? ?? '',
       duration: json['duration'] as String? ?? '00:00',
       isActive: json['is_active'] as bool? ?? true,

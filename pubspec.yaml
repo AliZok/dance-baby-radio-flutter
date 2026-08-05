@@ -1,6 +1,6 @@
 name: dance_baby_radio_flutter
-description: A Flutter Android application for Dance Baby Radio, matching the Nuxt 3 frontend styles and flows.
-version: 1.0.7+8
+description: Dance Baby Radio Flutter Android app v2 — radio player, auth, and playlists matching the Nuxt 3 frontend.
+version: 2.0.0+9
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -50,8 +50,8 @@ flutter:
 
 flutter_launcher_icons:
   android: true
-  image_path: "../dance-baby-radio-frontend/public/favicon/dance-baby-radio-no-back-2.png"
+  image_path: "assets/images/dance-baby-radio-back-black.png"
   adaptive_icon_background: "#000000"
-  adaptive_icon_foreground: "../dance-baby-radio-frontend/public/favicon/dance-baby-radio-no-back-2.png"
-  adaptive_icon_foreground_inset: 18
+  adaptive_icon_foreground: "assets/images/dance-baby-radio-back-black.png"
+  adaptive_icon_foreground_inset: 0
   min_sdk_android: 21

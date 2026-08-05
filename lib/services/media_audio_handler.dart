@@ -65,15 +65,29 @@ class MediaAudioHandler extends BaseAudioHandler with SeekHandler {
 
   @override
   Future<void> stop() async {
-    await _audioService.pauseAudio();
+    // Detach first so stopAudio()'s notifyListeners cannot overwrite the
+    // idle processing state that clears the Android media notification.
+    _audioService.removeListener(_broadcastState);
+    await _audioService.stopAudio();
     await super.stop();
+    // Re-attach so in-app play can restore lock-screen / notification controls
+    // if the Flutter UI is still alive (e.g. user dismissed the notification).
+    _audioService.addListener(_broadcastState);
+  }
+
+  /// User swiped the app away from Recents. Stop playback and tear down the
+  /// media session / notification. Do NOT hook AppLifecycleState.paused —
+  /// switching to Messages/etc. must keep background radio playing.
+  @override
+  Future<void> onTaskRemoved() async {
+    await stop();
   }
 
   @override
-  Future<void> skipToNext() => _audioService.playNextMusic();
+  Future<void> skipToNext() => _audioService.playNextMusic(fromUser: true);
 
   @override
-  Future<void> skipToPrevious() => _audioService.playNextMusic();
+  Future<void> skipToPrevious() => _audioService.playPreviousMusic();
 
   @override
   Future<void> rewind() async {

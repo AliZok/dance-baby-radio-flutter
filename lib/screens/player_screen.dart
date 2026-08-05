@@ -4,9 +4,14 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter_spinkit/flutter_spinkit.dart';
 import '../services/audio_service.dart';
+import '../services/auth_service.dart';
+import '../services/playlist_service.dart';
+import '../theme/app_colors.dart';
 import '../widgets/stars_background.dart';
 import '../widgets/video_background.dart';
 import '../widgets/genre_selector.dart';
+import '../widgets/app_header.dart';
+import '../widgets/playlist_selector.dart';
 
 /// Draws a solid right-pointing triangle (▶), matching the Nuxt frontend's
 /// `.button-icon` CSS-border triangle trick, but as real vector geometry so
@@ -56,10 +61,14 @@ class _RightTrianglePainter extends CustomPainter {
 
 class PlayerScreen extends StatefulWidget {
   final AudioService audioService;
+  final AuthService authService;
+  final PlaylistService playlistService;
 
   const PlayerScreen({
     Key? key,
     required this.audioService,
+    required this.authService,
+    required this.playlistService,
   }) : super(key: key);
 
   @override
@@ -67,9 +76,21 @@ class PlayerScreen extends StatefulWidget {
 }
 
 class _PlayerScreenState extends State<PlayerScreen> {
-  bool _showControls = false; // In mobile front-end, controls are hidden by default
-  bool _isGenreOpen = false; // Manages the open/close state of the genre selector
+  // Default immersive state (matches Nuxt `notShowing = true`):
+  // player + brand logo visible; chrome/controls hidden until a page tap.
+  bool _showControls = false; // Volume / repeat / playlist / titles
+  bool _showChrome = false; // Login, genre, next — off-screen until page tap
+  bool _isGenreOpen = false;
+  bool _isPlaylistOpen = false;
   bool _isNextPressed = false;
+  /// Local scrub position while the user drags the timeline — avoids fighting
+  /// the position stream and matches Nuxt `isSeeking`.
+  bool _isScrubbing = false;
+  double _scrubSeconds = 0;
+  int _headerDismissToken = 0;
+
+  static const _chromeDuration = Duration(milliseconds: 340);
+  static const _chromeCurve = Curves.easeOutCubic;
 
   String _formatDuration(Duration duration) {
     final minutes = duration.inMinutes;
@@ -77,25 +98,46 @@ class _PlayerScreenState extends State<PlayerScreen> {
     return '$minutes:$seconds';
   }
 
-  void _closeGenreMenu() {
-    if (_isGenreOpen) {
+  void _closeOverlayMenus() {
+    if (_isGenreOpen || _isPlaylistOpen) {
       setState(() {
         _isGenreOpen = false;
+        _isPlaylistOpen = false;
       });
     }
+    setState(() => _headerDismissToken++);
   }
 
-  // Custom SVG path for the exact Repeat icon from the Nuxt project
+  void _onBackgroundTap() {
+    _closeOverlayMenus();
+    setState(() {
+      // Page tap toggles all secondary UI together: login, genre, next,
+      // and the player-side controls (volume / repeat / playlist / titles).
+      final show = !(_showChrome || _showControls);
+      _showChrome = show;
+      _showControls = show;
+      if (!show) {
+        _isGenreOpen = false;
+        _isPlaylistOpen = false;
+      }
+    });
+  }
+
+  // Custom SVG path for the exact Repeat icon from the Nuxt project.
+  // Frontend: `.repeat-icon { opacity: 0.4 }` / `.active { opacity: 1 }`.
   Widget _buildRepeatIcon(bool isActive) {
-    return SvgPicture.string(
-      '''
-      <svg xmlns="http://www.w3.org/2000/svg" width="25" height="25" fill="${isActive ? '#52DCFF' : '#66FFFFFF'}" class="bi bi-arrow-repeat" viewBox="0 0 16 16">
-          <path d="M11.534 7h3.932a.25.25 0 0 1 .192.41l-1.966 2.36a.25.25 0 0 1-.384 0l-1.966-2.36a.25.25 0 0 1 .192-.41zm-11 2h3.932a.25.25 0 0 0 .192-.41L2.692 6.23a.25.25 0 0 0-.384 0L.342 8.59A.25.25 0 0 0 .534 9z" />
-          <path fill-rule="evenodd" d="M8 3c-1.552 0-2.94.707-3.857 1.818a.5.5 0 1 1-.771-.636A6.002 6.002 0 0 1 13.917 7H12.9A5.002 5.002 0 0 0 8 3zM3.1 9a5.002 5.002 0 0 0 8.757 2.182.5.5 0 1 1 .771.636A6.002 6.002 0 0 1 2.083 9H3.1z" />
-      </svg>
-      ''',
-      width: 25,
-      height: 25,
+    return Opacity(
+      opacity: isActive ? 1.0 : 0.4,
+      child: SvgPicture.string(
+        '''
+        <svg xmlns="http://www.w3.org/2000/svg" width="25" height="25" fill="#52DCFF" class="bi bi-arrow-repeat" viewBox="0 0 16 16">
+            <path d="M11.534 7h3.932a.25.25 0 0 1 .192.41l-1.966 2.36a.25.25 0 0 1-.384 0l-1.966-2.36a.25.25 0 0 1 .192-.41zm-11 2h3.932a.25.25 0 0 0 .192-.41L2.692 6.23a.25.25 0 0 0-.384 0L.342 8.59A.25.25 0 0 0 .534 9z" />
+            <path fill-rule="evenodd" d="M8 3c-1.552 0-2.94.707-3.857 1.818a.5.5 0 1 1-.771-.636A6.002 6.002 0 0 1 13.917 7H12.9A5.002 5.002 0 0 0 8 3zM3.1 9a5.002 5.002 0 0 0 8.757 2.182.5.5 0 1 1 .771.636A6.002 6.002 0 0 1 2.083 9H3.1z" />
+        </svg>
+        ''',
+        width: 25,
+        height: 25,
+      ),
     );
   }
 
@@ -253,54 +295,32 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 Positioned.fill(
                   child: GestureDetector(
                     behavior: HitTestBehavior.opaque,
-                    onTap: () {
-                      _closeGenreMenu();
-                      setState(() => _showControls = false);
-                    },
+                    onTap: _onBackgroundTap,
                   ),
                 ),
 
-                // 4. Header (Top Left)
-                Positioned(
-                  top: MediaQuery.of(context).padding.top + 10,
-                  left: 16,
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.center,
-                    children: [
-                      Text(
-                        "DANCE BABY RADIO",
-                        style: GoogleFonts.daysOne(
-                          fontSize: 18,
-                          color: const Color(0xFF94D4E3),
-                          shadows: [
-                            Shadow(
-                              color: const Color(0xFFCCFBF7).withOpacity(0.5),
-                              blurRadius: 8,
-                            ),
-                          ],
+                // Playlist mode badge
+                if (widget.audioService.isPlaylistMode)
+                  Positioned(
+                    top: MediaQuery.of(context).padding.top + 52,
+                    left: 16,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withOpacity(0.45),
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: AppColors.primary.withOpacity(0.35)),
+                      ),
+                      child: Text(
+                        '♪ ${widget.audioService.activePlaybackPlaylist?.name ?? 'Playlist'}',
+                        style: const TextStyle(
+                          color: AppColors.primary,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
                         ),
                       ),
-                      const SizedBox(width: 12),
-                      if (isPlaying)
-                        Container(
-                          width: 44,
-                          height: 25,
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(4),
-                            border: Border.all(color: Colors.white.withOpacity(0.2)),
-                          ),
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(4),
-                            child: Image.asset(
-                              'assets/images/radio-playing-2.webp',
-                              fit: BoxFit.cover,
-                              errorBuilder: (context, error, stackTrace) => const SizedBox.shrink(),
-                            ),
-                          ),
-                        ),
-                    ],
+                    ),
                   ),
-                ),
 
                 // 5. Main Player Box (Center)
                 Center(
@@ -310,7 +330,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                       padding: const EdgeInsets.symmetric(horizontal: 24.0),
                       child: Stack(
                       alignment: Alignment.center,
-                      clipBehavior: Clip.hardEdge,
+                      clipBehavior: Clip.none,
                       children: [
                         // Animated Controls (Repeat on Right, Volume on Left)
                         // They slide out from behind the Player Card
@@ -323,7 +343,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
                           top: _showControls ? 5 : 60,
                           left: 0,
                           right: 0,
-                          child: AnimatedOpacity(
+                          child: IgnorePointer(
+                            ignoring: !_showControls,
+                            child: AnimatedOpacity(
                             duration: const Duration(milliseconds: 300),
                             opacity: _showControls ? 1.0 : 0.0,
                             child: SizedBox(
@@ -333,7 +355,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                 children: [
                                   // Volume Slider (Left side, NO speaker icon)
                                   Container(
-                                    width: 110,
+                                    width: 100,
                                     height: 40,
                                     padding: const EdgeInsets.symmetric(horizontal: 6),
                                     decoration: BoxDecoration(
@@ -362,39 +384,60 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                     ),
                                   ),
 
-                                  // Repeat Button (Right side, custom SVG icon)
-                                  GestureDetector(
-                                    onTap: widget.audioService.toggleRepeat,
-                                    behavior: HitTestBehavior.opaque,
-                                    child: AnimatedContainer(
-                                      duration:
-                                          const Duration(milliseconds: 180),
-                                      width: 40,
-                                      height: 40,
-                                      decoration: BoxDecoration(
-                                        color: const Color(
-                                          0xFF10191A,
-                                        ).withOpacity(0.78),
-                                        borderRadius: BorderRadius.circular(30),
-                                        boxShadow: isRepeat
-                                            ? [
-                                                BoxShadow(
-                                                  color: const Color(
-                                                    0xFF52DCFF,
-                                                  ).withOpacity(0.7),
-                                                  blurRadius: 14,
-                                                  spreadRadius: 1,
-                                                ),
-                                              ]
-                                            : null,
+                                  Row(
+                                    children: [
+                                      // Playlist button + menu
+                                      PlaylistSelector(
+                                        authService: widget.authService,
+                                        audioService: widget.audioService,
+                                        playlistService: widget.playlistService,
+                                        isOpen: _isPlaylistOpen,
+                                        onOpenChanged: (open) {
+                                          setState(() {
+                                            _isPlaylistOpen = open;
+                                            if (open) {
+                                              _isGenreOpen = false;
+                                              _showControls = true;
+                                            }
+                                          });
+                                        },
                                       ),
-                                      alignment: Alignment.center,
-                                      child: _buildRepeatIcon(isRepeat),
-                                    ),
+                                      const SizedBox(width: 8),
+                                      // Repeat — frontend: square 44×44, radius 7px;
+                                      // active = icon opacity 1 + soft shadow (not neon blast)
+                                      GestureDetector(
+                                        onTap: widget.audioService.toggleRepeat,
+                                        behavior: HitTestBehavior.opaque,
+                                        child: AnimatedContainer(
+                                          duration:
+                                              const Duration(milliseconds: 180),
+                                          width: 44,
+                                          height: 44,
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xEB0A161A),
+                                            borderRadius: BorderRadius.circular(7),
+                                            boxShadow: isRepeat
+                                                ? [
+                                                    BoxShadow(
+                                                      color: const Color(
+                                                        0xFF52DCFF,
+                                                      ).withOpacity(0.2),
+                                                      blurRadius: 8,
+                                                      offset: const Offset(0, 2),
+                                                    ),
+                                                  ]
+                                                : null,
+                                          ),
+                                          alignment: Alignment.center,
+                                          child: _buildRepeatIcon(isRepeat),
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ],
                               ),
                             ),
+                          ),
                           ),
                         ),
 
@@ -406,9 +449,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
                           padding: const EdgeInsets.only(top: 55),
                           child: GestureDetector(
                             onTap: () {
-                              _closeGenreMenu();
+                              _closeOverlayMenus();
                               setState(() {
-                                _showControls = !_showControls;
+                                // Tap on the player card reveals the same
+                                // secondary controls as a page tap.
+                                final show = !(_showChrome || _showControls);
+                                _showChrome = show;
+                                _showControls = show;
+                                if (!show) {
+                                  _isGenreOpen = false;
+                                  _isPlaylistOpen = false;
+                                }
                               });
                             },
                             child: Container(
@@ -516,7 +567,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                   ),
                                 const SizedBox(height: 16),
 
-                                // Seek Slider
+                                // Seek Slider — commit on finger-up only
+                                // (Nuxt: isSeeking + seek on change), so a
+                                // drag cannot race into the next track.
                                 SliderTheme(
                                   data: SliderTheme.of(context).copyWith(
                                     activeTrackColor: const Color(0xFF58D1EF),
@@ -528,16 +581,36 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                     ),
                                   ),
                                   child: Slider(
-                                    value: currentTime.inSeconds.toDouble().clamp(
-                                          0.0,
-                                          duration.inSeconds.toDouble(),
-                                        ),
+                                    value: () {
+                                      final maxSecs = duration.inSeconds > 0
+                                          ? duration.inSeconds.toDouble()
+                                          : 1.0;
+                                      final raw = _isScrubbing
+                                          ? _scrubSeconds
+                                          : currentTime.inSeconds.toDouble();
+                                      return raw.clamp(0.0, maxSecs);
+                                    }(),
                                     min: 0.0,
                                     max: duration.inSeconds > 0
                                         ? duration.inSeconds.toDouble()
                                         : 1.0,
+                                    onChangeStart: (val) {
+                                      setState(() {
+                                        _isScrubbing = true;
+                                        _scrubSeconds = val;
+                                      });
+                                    },
                                     onChanged: (val) {
-                                      widget.audioService.seek(Duration(seconds: val.toInt()));
+                                      setState(() => _scrubSeconds = val);
+                                    },
+                                    onChangeEnd: (val) {
+                                      setState(() {
+                                        _isScrubbing = false;
+                                        _scrubSeconds = val;
+                                      });
+                                      widget.audioService.seek(
+                                        Duration(seconds: val.toInt()),
+                                      );
                                     },
                                   ),
                                 ),
@@ -628,88 +701,105 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   ),
                 ),
 
-                // 6. Genre Button (Bottom Left)
-                Positioned(
-                  bottom: 27 + MediaQuery.of(context).padding.bottom,
-                  left: 20,
-                  child: GenreSelector(
-                    audioService: widget.audioService,
-                    isOpen: _isGenreOpen,
-                    onToggle: () {
-                      setState(() {
-                        _isGenreOpen = !_isGenreOpen;
-                      });
-                    },
+                // 6. Genre — hidden in playlist mode; slides in from left edge
+                if (!widget.audioService.isPlaylistMode)
+                  AnimatedPositioned(
+                    duration: _chromeDuration,
+                    curve: _chromeCurve,
+                    bottom: 27 + MediaQuery.of(context).padding.bottom,
+                    left: _showChrome ? 20 : -120,
+                    child: IgnorePointer(
+                      ignoring: !_showChrome,
+                      child: GenreSelector(
+                        audioService: widget.audioService,
+                        isOpen: _isGenreOpen,
+                        onToggle: () {
+                          setState(() {
+                            _isGenreOpen = !_isGenreOpen;
+                            if (_isGenreOpen) _isPlaylistOpen = false;
+                          });
+                        },
+                      ),
+                    ),
                   ),
-                ),
 
-                // 7. Next Button (Bottom Right)
-                // Group-opacity 0.6 matches the frontend's
-                // `.next-button-box { opacity: .6 }` rule.
-                Positioned(
+                // 7. Next — slides in from right edge
+                AnimatedPositioned(
+                  duration: _chromeDuration,
+                  curve: _chromeCurve,
                   bottom: 27 + MediaQuery.of(context).padding.bottom,
-                  right: 20,
-                  child: GestureDetector(
-                    onTapDown: (_) => setState(() => _isNextPressed = true),
-                    onTapUp: (_) => setState(() => _isNextPressed = false),
-                    onTapCancel: () =>
-                        setState(() => _isNextPressed = false),
-                    onTap: () {
-                      _closeGenreMenu();
-                      widget.audioService.playNextMusic();
-                    },
-                    child: AnimatedOpacity(
-                      duration: const Duration(milliseconds: 180),
-                      opacity: _isNextPressed ? 1 : 0.7,
-                      child: AnimatedContainer(
+                  right: _showChrome ? 20 : -120,
+                  child: IgnorePointer(
+                    ignoring: !_showChrome,
+                    child: GestureDetector(
+                      onTapDown: (_) => setState(() => _isNextPressed = true),
+                      onTapUp: (_) => setState(() => _isNextPressed = false),
+                      onTapCancel: () =>
+                          setState(() => _isNextPressed = false),
+                      onTap: () {
+                        _closeOverlayMenus();
+                        widget.audioService.playNextMusic(fromUser: true);
+                      },
+                      child: AnimatedOpacity(
                         duration: const Duration(milliseconds: 180),
-                        width: 83,
-                        height: 81,
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF10191A).withOpacity(0.78),
-                          shape: BoxShape.circle,
-                          boxShadow: _isNextPressed
-                              ? [
-                                  BoxShadow(
-                                    color: const Color(
-                                      0xFF52DCFF,
-                                    ).withOpacity(0.75),
-                                    blurRadius: 18,
-                                    spreadRadius: 2,
+                        opacity: _isNextPressed ? 1 : 0.7,
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 180),
+                          width: 91,
+                          height: 89,
+                          decoration: BoxDecoration(
+                            color: const Color(0xEB0A161A),
+                            borderRadius: BorderRadius.circular(7),
+                            boxShadow: _isNextPressed
+                                ? [
+                                    BoxShadow(
+                                      color: const Color(
+                                        0xFF52DCFF,
+                                      ).withOpacity(0.22),
+                                      blurRadius: 10,
+                                      offset: const Offset(0, 2),
+                                    ),
+                                  ]
+                                : null,
+                          ),
+                          alignment: Alignment.center,
+                          child: Padding(
+                            padding: const EdgeInsets.only(left: 3),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                _RightTriangle(
+                                  width: 12,
+                                  height: 16,
+                                  color: const Color(0xFF52DCFF).withOpacity(
+                                    _isNextPressed ? 1 : 0.7,
                                   ),
-                                ]
-                              : null,
-                        ),
-                        alignment: Alignment.center,
-                        child: Padding(
-                          // Nudge right to visually center the pair of
-                          // right-pointing "skip" triangles in the circle.
-                          padding: const EdgeInsets.only(left: 3),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              _RightTriangle(
-                                width: 12,
-                                height: 16,
-                                color: const Color(0xFF52DCFF).withOpacity(
-                                  _isNextPressed ? 1 : 0.7,
                                 ),
-                              ),
-                              const SizedBox(width: 3),
-                              _RightTriangle(
-                                width: 12,
-                                height: 16,
-                                color: const Color(0xFF52DCFF).withOpacity(
-                                  _isNextPressed ? 1 : 0.7,
+                                const SizedBox(width: 3),
+                                _RightTriangle(
+                                  width: 12,
+                                  height: 16,
+                                  color: const Color(0xFF52DCFF).withOpacity(
+                                    _isNextPressed ? 1 : 0.7,
+                                  ),
                                 ),
-                              ),
-                            ],
+                              ],
+                            ),
                           ),
                         ),
                       ),
                     ),
                   ),
+                ),
+
+                // Header — slides in from top (login / account menu)
+                AppHeader(
+                  authService: widget.authService,
+                  audioService: widget.audioService,
+                  playlistService: widget.playlistService,
+                  dismissToken: _headerDismissToken,
+                  visible: _showChrome,
                 ),
               ],
             );

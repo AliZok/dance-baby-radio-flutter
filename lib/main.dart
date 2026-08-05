@@ -5,8 +5,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'services/supabase_service.dart';
 import 'services/audio_service.dart';
+import 'services/auth_service.dart';
+import 'services/playlist_service.dart';
 import 'services/media_audio_handler.dart';
 import 'screens/player_screen.dart';
+import 'theme/app_colors.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -22,15 +25,24 @@ void main() async {
   // Initialize Supabase
   await SupabaseService.initialize();
 
+  final authService = AuthService();
+  await authService.init();
+
+  final playlistService = PlaylistService(authService);
+  final audioService = AudioService();
+
   // Render the Flutter UI before starting the media session or loading tracks.
   // This guarantees that an audio-service startup error can never leave Android
   // on a blank launch window.
-  final audioService = AudioService();
-  runApp(MyApp(audioService: audioService));
+  runApp(MyApp(
+    audioService: audioService,
+    authService: authService,
+    playlistService: playlistService,
+  ));
 
   // Track loading and the OS media session are independent. Starting them in
   // parallel prevents a vendor-specific media-service delay from trapping the
-  // UI on its loading screen.
+  // UI on its loading screen. Playback itself waits for Let's GO / post-login.
   unawaited(audioService.initialize());
   unawaited(_initializeMediaSession(audioService));
 }
@@ -57,10 +69,14 @@ Future<void> _initializeMediaSession(AudioService audioService) async {
 
 class MyApp extends StatelessWidget {
   final AudioService audioService;
+  final AuthService authService;
+  final PlaylistService playlistService;
 
   const MyApp({
     Key? key,
     required this.audioService,
+    required this.authService,
+    required this.playlistService,
   }) : super(key: key);
 
   @override
@@ -70,15 +86,22 @@ class MyApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
-        primaryColor: const Color(0xFF84F3FF),
+        primaryColor: AppColors.primary,
         colorScheme: const ColorScheme.dark(
-          primary: Color(0xFF84F3FF),
-          secondary: Color(0xFF52DCFF),
-          surface: Color(0xFF10191A),
+          primary: AppColors.primary,
+          secondary: AppColors.secondary,
+          surface: AppColors.surface,
         ),
         scaffoldBackgroundColor: Colors.black,
+        snackBarTheme: const SnackBarThemeData(
+          behavior: SnackBarBehavior.floating,
+        ),
       ),
-      home: PlayerScreen(audioService: audioService),
+      home: PlayerScreen(
+        audioService: audioService,
+        authService: authService,
+        playlistService: playlistService,
+      ),
     );
   }
 }

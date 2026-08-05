@@ -93,11 +93,11 @@ class _GenreSelectorState extends State<GenreSelector> {
         behavior: HitTestBehavior.opaque,
         onTap: widget.onToggle,
         child: Container(
-          width: 80,
-          height: 80,
+          width: 88,
+          height: 88,
           decoration: BoxDecoration(
-            color: const Color(0xFF10191A).withOpacity(0.78),
-            shape: BoxShape.circle,
+            color: const Color(0xEB0A161A),
+            borderRadius: BorderRadius.circular(7),
           ),
           alignment: Alignment.center,
           child: Text(
@@ -110,8 +110,8 @@ class _GenreSelectorState extends State<GenreSelector> {
               shadows: widget.isOpen
                   ? [
                       Shadow(
-                        color: const Color(0xFF84F3FF).withOpacity(0.75),
-                        blurRadius: 9,
+                        color: const Color(0xFF84F3FF).withOpacity(0.35),
+                        blurRadius: 6,
                       ),
                     ]
                   : null,
