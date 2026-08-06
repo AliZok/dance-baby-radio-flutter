@@ -45,6 +45,10 @@ class AudioService extends ChangeNotifier {
   DateTime? _ignoreCompletedUntil;
   bool _hasStarted = false;
   double _volume = 1.0; // 0.0 to 1.0
+  /// Last volume written to the active player (may be faded below [_volume]).
+  double _lastAppliedPlayerVolume = 1.0;
+  /// Fade the active track to silence over this window before it ends.
+  static const Duration _fadeOutDuration = Duration(seconds: 4);
   /// Prevents stacked error→skip handlers from fighting over the dual players.
   bool _handlingPlaybackError = false;
   /// Caps auto-skip storms when several bad URLs land in a row.
@@ -296,11 +300,39 @@ class AudioService extends ChangeNotifier {
     }
   }
 
+  /// Ramp active-player volume to 0 over the last [_fadeOutDuration].
+  /// Keeps user preference in [_volume] so the slider / next track stay correct.
+  void _applyFadeOutVolume(Duration position) {
+    var factor = 1.0;
+    if (!_isTransitioning && _duration > Duration.zero) {
+      final fadeMs = min(
+        _fadeOutDuration.inMilliseconds,
+        _duration.inMilliseconds,
+      );
+      final remainingMs = (_duration - position).inMilliseconds;
+      if (remainingMs < fadeMs) {
+        factor = (remainingMs / fadeMs).clamp(0.0, 1.0);
+      }
+    }
+
+    final target = (_volume * factor).clamp(0.0, 1.0);
+    if ((target - _lastAppliedPlayerVolume).abs() < 0.002) return;
+    _lastAppliedPlayerVolume = target;
+    unawaited(activePlayer.setVolume(target));
+  }
+
+  void _restoreFullVolume() {
+    _lastAppliedPlayerVolume = _volume;
+    unawaited(_playerPrimary.setVolume(_volume));
+    unawaited(_playerSupport.setVolume(_volume));
+  }
+
   void _setupListeners() {
     // Primary Player Listeners
     _primaryPositionSub = _playerPrimary.positionStream.listen((pos) {
       if (!_originAudio) {
         _currentTime = pos;
+        _applyFadeOutVolume(pos);
         notifyListeners();
       }
     });
@@ -308,6 +340,7 @@ class AudioService extends ChangeNotifier {
     _primaryDurationSub = _playerPrimary.durationStream.listen((dur) {
       if (!_originAudio && dur != null) {
         _duration = dur;
+        _applyFadeOutVolume(_currentTime);
         notifyListeners();
       }
     });
@@ -342,6 +375,7 @@ class AudioService extends ChangeNotifier {
     _supportPositionSub = _playerSupport.positionStream.listen((pos) {
       if (_originAudio) {
         _currentTime = pos;
+        _applyFadeOutVolume(pos);
         notifyListeners();
       }
     });
@@ -349,6 +383,7 @@ class AudioService extends ChangeNotifier {
     _supportDurationSub = _playerSupport.durationStream.listen((dur) {
       if (_originAudio && dur != null) {
         _duration = dur;
+        _applyFadeOutVolume(_currentTime);
         notifyListeners();
       }
     });
@@ -658,6 +693,8 @@ class AudioService extends ChangeNotifier {
       // Flip to the preloaded player (already setUrl'd in the background).
       _originAudio = !_originAudio;
       _currentTime = Duration.zero;
+      // New track must start at the user's volume (outgoing side may be faded).
+      _restoreFullVolume();
       await activePlayer.seek(Duration.zero);
       _duration = activePlayer.duration ?? Duration.zero;
       notifyListeners();
@@ -752,6 +789,7 @@ class AudioService extends ChangeNotifier {
 
     _currentTime = Duration.zero;
     _duration = Duration.zero;
+    _restoreFullVolume();
     notifyListeners();
 
     try {
@@ -779,14 +817,20 @@ class AudioService extends ChangeNotifier {
     _ignoreCompletedUntil =
         DateTime.now().add(const Duration(milliseconds: 600));
     _currentTime = target;
+    // Force a volume re-apply (seek may leave or enter the fade window).
+    _lastAppliedPlayerVolume = -1;
+    _applyFadeOutVolume(target);
     notifyListeners();
     unawaited(activePlayer.seek(target));
   }
 
   void setVolume(double val) {
     _volume = val.clamp(0.0, 1.0);
-    _playerPrimary.setVolume(_volume);
-    _playerSupport.setVolume(_volume);
+    // Inactive side stays at full user volume for the next flip; active side
+    // keeps any in-progress end-of-track fade relative to the new preference.
+    unawaited(inactivePlayer.setVolume(_volume));
+    _lastAppliedPlayerVolume = -1;
+    _applyFadeOutVolume(_currentTime);
     notifyListeners();
   }
 
