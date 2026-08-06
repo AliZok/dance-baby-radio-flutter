@@ -594,12 +594,24 @@ class _PlaylistRow extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    color: highlighted
-                        ? const Color(0xFFE8FBFF)
-                        : Colors.white,
+                    // Active playback source: theme primary + glow (like genres).
+                    // Track membership alone: brighter text, not theme-lit.
+                    color: isPlayingSource
+                        ? AppColors.primary
+                        : highlighted
+                            ? const Color(0xFFE8FBFF)
+                            : Colors.white,
                     fontSize: 13,
                     fontWeight:
                         highlighted ? FontWeight.w600 : FontWeight.w500,
+                    shadows: isPlayingSource
+                        ? [
+                            Shadow(
+                              color: AppColors.primary.withOpacity(0.55),
+                              blurRadius: 7,
+                            ),
+                          ]
+                        : null,
                   ),
                 ),
               ),
