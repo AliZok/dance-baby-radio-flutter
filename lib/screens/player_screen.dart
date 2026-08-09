@@ -12,6 +12,7 @@ import '../widgets/video_background.dart';
 import '../widgets/genre_selector.dart';
 import '../widgets/app_header.dart';
 import '../widgets/playlist_selector.dart';
+import '../widgets/app_toast.dart';
 
 /// Draws a solid right-pointing triangle (▶), matching the Nuxt frontend's
 /// `.button-icon` CSS-border triangle trick, but as real vector geometry so
@@ -129,6 +130,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (velocity.abs() < 280) return;
     _closeOverlayMenus();
     widget.audioService.playNextMusic(fromUser: true);
+    AppToast.info(context, 'Skipping to the next track.', title: 'Next');
   }
 
   /// Top→bottom fling → soft app reset (reload tracks + loading splash).
@@ -144,6 +146,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _isPlaylistOpen = false;
     });
     widget.audioService.refreshRadio();
+    AppToast.info(context, 'Refreshing the radio stream.', title: 'Refresh');
   }
 
   // Custom SVG path for the exact Repeat icon from the Nuxt project.
@@ -449,7 +452,18 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                       // Repeat — frontend: square 44×44, radius 7px;
                                       // active = icon opacity 1 + soft shadow (not neon blast)
                                       GestureDetector(
-                                        onTap: widget.audioService.toggleRepeat,
+                                        onTap: () async {
+                                          await widget.audioService.toggleRepeat();
+                                          if (!mounted) return;
+                                          final on = widget.audioService.isRepeat;
+                                          AppToast.info(
+                                            this.context,
+                                            on
+                                                ? 'This track will loop.'
+                                                : 'Repeat turned off.',
+                                            title: 'Repeat',
+                                          );
+                                        },
                                         behavior: HitTestBehavior.opaque,
                                         child: AnimatedContainer(
                                           duration:
@@ -784,6 +798,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
                       onTap: () {
                         _closeOverlayMenus();
                         widget.audioService.playNextMusic(fromUser: true);
+                        AppToast.info(
+                          context,
+                          'Skipping to the next track.',
+                          title: 'Next',
+                        );
                       },
                       child: AnimatedOpacity(
                         duration: const Duration(milliseconds: 180),

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../services/auth_service.dart';
 import '../theme/app_colors.dart';
 import '../widgets/auth_widgets.dart';
+import '../widgets/app_toast.dart';
 import 'register_screen.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -64,9 +65,13 @@ class _LoginScreenState extends State<LoginScreen> {
     if (!mounted) return;
 
     if (result.success) {
+      AppToast.success(context, 'Welcome back.', title: 'Signed in');
       Navigator.of(context).popUntil((route) => route.isFirst);
     } else {
       setState(() {});
+      if (result.error != null && result.error!.isNotEmpty) {
+        AppToast.error(context, result.error!, title: 'Sign in');
+      }
     }
   }
 

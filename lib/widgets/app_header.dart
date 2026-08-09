@@ -6,6 +6,7 @@ import '../services/playlist_service.dart';
 import '../theme/app_colors.dart';
 import '../screens/login_screen.dart';
 import '../screens/playlists_screen.dart';
+import 'app_toast.dart';
 
 /// Brand header + account hamburger (Nuxt HeaderMain).
 /// Account dropdown uses [Overlay] so it never falls under the player card.
@@ -154,15 +155,19 @@ class _AppHeaderState extends State<AppHeader> {
                           _closeMenu();
                           widget.audioService.clearPlaylistModeOnLogout();
                           await widget.authService.signOut();
-                          if (context.mounted) {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (_) =>
-                                    LoginScreen(authService: widget.authService),
-                              ),
-                            );
-                          }
+                          if (!mounted) return;
+                          AppToast.info(
+                            context,
+                            'You have been signed out.',
+                            title: 'Account',
+                          );
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) =>
+                                  LoginScreen(authService: widget.authService),
+                            ),
+                          );
                         }, danger: true),
                       ],
                     ),

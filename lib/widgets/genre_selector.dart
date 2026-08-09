@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../services/audio_service.dart';
+import 'app_toast.dart';
 
 class GenreSelector extends StatefulWidget {
   final AudioService audioService;
@@ -146,7 +147,17 @@ class _GenreMenu extends StatelessWidget {
             children: audioService.genres.map((genre) {
               return GestureDetector(
                 behavior: HitTestBehavior.opaque,
-                onTap: () => audioService.toggleGenre(genre),
+                onTap: () {
+                  final turningOn = !genre.active;
+                  audioService.toggleGenre(genre);
+                  AppToast.info(
+                    context,
+                    turningOn
+                        ? '“${genre.text}” filter on.'
+                        : '“${genre.text}” filter off.',
+                    title: 'Genre',
+                  );
+                },
                 child: Padding(
                   padding: const EdgeInsets.symmetric(vertical: 8),
                   child: SizedBox(
