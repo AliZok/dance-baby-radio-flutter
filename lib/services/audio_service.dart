@@ -858,50 +858,52 @@ class AudioService extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> playPreviousMusic() async {
-    // If current song has played for more than 3 seconds, restart it (matching Nuxt logic)
-    if (_currentTime.inSeconds > 3) {
-      seek(Duration.zero);
-      return;
-    }
+  /// Prev (UI / lock-screen / headset) behaves like Next — radio shuffle
+  /// never walks history backwards.
+  Future<void> playPreviousMusic() => playNextMusic(fromUser: true);
 
-    if (_playbackHistory.isEmpty) {
-      seek(Duration.zero);
-      return;
+  /// Soft reset: show loading splash, fetch fresh dual buffers, autoplay.
+  /// Keeps genre filters and playlist mode; clears history and transition state.
+  Future<void> refreshRadio() async {
+    if (_isTransitioning) {
+      _queuedNext = false;
     }
-
-    _isLoading = true;
-    _expectingPlayback = true;
+    _isTransitioning = true;
+    _queuedNext = false;
+    _refillGeneration++;
+    _refillFuture = null;
+    _expectingPlayback = false;
     _disarmStuckWatch();
-    notifyListeners();
-
-    // Pause active player
-    await activePlayer.pause();
-    await activePlayer.seek(Duration.zero);
-
-    // Retrieve previous track from history
-    final prevTrack = _playbackHistory.removeLast();
-
-    if (_originAudio) {
-      _currentSupportTrack = prevTrack;
-      await _preloadSupport();
-    } else {
-      _currentOriginTrack = prevTrack;
-      await _preloadPrimary();
-    }
-
+    _handlingPlaybackError = false;
+    _consecutiveLoadFailures = 0;
+    _ignoreCompletedUntil = null;
+    _playbackHistory.clear();
+    _hasStarted = false;
+    _originAudio = false;
+    _isPlaying = false;
+    _isLoading = true;
+    _isAudioReady = false;
+    _currentOriginTrack = null;
+    _currentSupportTrack = null;
     _currentTime = Duration.zero;
     _duration = Duration.zero;
-    _restoreFullVolume();
     notifyListeners();
 
     try {
-      await _playActiveAndConfirm();
+      await Future.wait([
+        _playerPrimary.stop(),
+        _playerSupport.stop(),
+      ]);
     } catch (e) {
-      print('playPreviousMusic failed: $e');
-      _isLoading = false;
-      notifyListeners();
-      await _onActiveTrackFailed(activeTrack);
+      print('refreshRadio stop error: $e');
+    } finally {
+      _isTransitioning = false;
+    }
+
+    await _loadInitialTracks();
+    if (_isAudioReady) {
+      _hasStarted = true;
+      await resumeAudio();
     }
   }
 

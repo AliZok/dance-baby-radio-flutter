@@ -86,8 +86,9 @@ class MediaAudioHandler extends BaseAudioHandler with SeekHandler {
   @override
   Future<void> skipToNext() => _audioService.playNextMusic(fromUser: true);
 
+  /// Prev control intentionally advances — same as Next for radio shuffle.
   @override
-  Future<void> skipToPrevious() => _audioService.playPreviousMusic();
+  Future<void> skipToPrevious() => _audioService.playNextMusic(fromUser: true);
 
   @override
   Future<void> rewind() async {

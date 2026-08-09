@@ -123,6 +123,29 @@ class _PlayerScreenState extends State<PlayerScreen> {
     });
   }
 
+  /// Left/right fling → next track (prev is also next everywhere).
+  void _onHorizontalSwipe(DragEndDetails details) {
+    final velocity = details.primaryVelocity ?? 0;
+    if (velocity.abs() < 280) return;
+    _closeOverlayMenus();
+    widget.audioService.playNextMusic(fromUser: true);
+  }
+
+  /// Top→bottom fling → soft app reset (reload tracks + loading splash).
+  void _onVerticalSwipe(DragEndDetails details) {
+    final velocity = details.primaryVelocity ?? 0;
+    // Positive primaryVelocity = downward.
+    if (velocity < 420) return;
+    _closeOverlayMenus();
+    setState(() {
+      _showChrome = false;
+      _showControls = false;
+      _isGenreOpen = false;
+      _isPlaylistOpen = false;
+    });
+    widget.audioService.refreshRadio();
+  }
+
   // Custom SVG path for the exact Repeat icon from the Nuxt project.
   // Frontend: `.repeat-icon { opacity: 0.4 }` / `.active { opacity: 1 }`.
   Widget _buildRepeatIcon(bool isActive) {
@@ -308,12 +331,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   ),
                 ),
 
-                // Captures only empty-page taps; interactive controls are
+                // Captures empty-page taps + swipes; interactive controls are
                 // painted later in this Stack and therefore win hit testing.
                 Positioned.fill(
                   child: GestureDetector(
                     behavior: HitTestBehavior.opaque,
                     onTap: _onBackgroundTap,
+                    onHorizontalDragEnd: _onHorizontalSwipe,
+                    onVerticalDragEnd: _onVerticalSwipe,
                   ),
                 ),
 
@@ -480,6 +505,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                 }
                               });
                             },
+                            onHorizontalDragEnd: _onHorizontalSwipe,
+                            onVerticalDragEnd: _onVerticalSwipe,
                             child: Container(
                             width: 300,
                             padding: const EdgeInsets.fromLTRB(18, 40, 18, 18),
