@@ -49,11 +49,20 @@ class AudioService extends ChangeNotifier {
   double _lastAppliedPlayerVolume = 1.0;
   /// Fade the active track to silence over this window before it ends.
   static const Duration _fadeOutDuration = Duration(seconds: 4);
+  /// How long position may stall while we expect playback before auto-skip.
+  static const Duration _stuckTimeout = Duration(seconds: 11);
   /// Prevents stacked error→skip handlers from fighting over the dual players.
   bool _handlingPlaybackError = false;
   /// Caps auto-skip storms when several bad URLs land in a row.
   int _consecutiveLoadFailures = 0;
   static const int _maxConsecutiveLoadFailures = 8;
+  /// True while radio should keep producing audio (not user-paused / stopped).
+  bool _expectingPlayback = false;
+  /// Last position that counted as real progress (for stuck detection).
+  Duration _lastProgressPosition = Duration.zero;
+  /// When position last advanced while we expected playback.
+  DateTime? _lastProgressAt;
+  Timer? _stuckWatchTimer;
 
   Duration _currentTime = Duration.zero;
   Duration _duration = Duration.zero;
@@ -332,6 +341,7 @@ class AudioService extends ChangeNotifier {
     _primaryPositionSub = _playerPrimary.positionStream.listen((pos) {
       if (!_originAudio) {
         _currentTime = pos;
+        _notePlaybackProgress(pos);
         _applyFadeOutVolume(pos);
         notifyListeners();
       }
@@ -350,8 +360,14 @@ class AudioService extends ChangeNotifier {
       if (_originAudio) return;
 
       _isPlaying = state.playing;
-      _isLoading = state.processingState == ProcessingState.buffering ||
-          state.processingState == ProcessingState.loading;
+      // Spinner only while we still have no audible progress. Once the playhead
+      // has moved, brief rebuffer must not hide→show the spinner (that caused a
+      // silent gap right after loading vanished).
+      final hasAudibleProgress =
+          state.playing && _currentTime > const Duration(milliseconds: 80);
+      _isLoading = state.processingState == ProcessingState.loading ||
+          (state.processingState == ProcessingState.buffering &&
+              !hasAudibleProgress);
 
       if (state.processingState == ProcessingState.completed) {
         _handleTrackCompleted();
@@ -359,15 +375,16 @@ class AudioService extends ChangeNotifier {
       notifyListeners();
     });
 
-    // Async load/play failures never reach the unawaited play() caller —
-    // listen here so a dead URL still advances and auto-plays the next track.
+    // Async load/play failures never reach the unawaited play() caller.
+    // Do NOT skip immediately — wait for the 11s stuck watchdog so a transient
+    // glitch mid-song cannot jump tracks.
     _primaryErrorSub = _playerPrimary.playbackEventStream.listen(
       (_) {},
       onError: (Object e, StackTrace st) {
         if (_originAudio) return; // inactive side — ignore
         if (_isTransitioning || _handlingPlaybackError) return;
-        print('Primary playback error: $e');
-        unawaited(_onActiveTrackFailed(_currentOriginTrack));
+        print('Primary playback error (waiting for stuck timeout): $e');
+        _onActivePlaybackGlitch();
       },
     );
 
@@ -375,6 +392,7 @@ class AudioService extends ChangeNotifier {
     _supportPositionSub = _playerSupport.positionStream.listen((pos) {
       if (_originAudio) {
         _currentTime = pos;
+        _notePlaybackProgress(pos);
         _applyFadeOutVolume(pos);
         notifyListeners();
       }
@@ -393,8 +411,11 @@ class AudioService extends ChangeNotifier {
       if (!_originAudio) return;
 
       _isPlaying = state.playing;
-      _isLoading = state.processingState == ProcessingState.buffering ||
-          state.processingState == ProcessingState.loading;
+      final hasAudibleProgress =
+          state.playing && _currentTime > const Duration(milliseconds: 80);
+      _isLoading = state.processingState == ProcessingState.loading ||
+          (state.processingState == ProcessingState.buffering &&
+              !hasAudibleProgress);
 
       if (state.processingState == ProcessingState.completed) {
         _handleTrackCompleted();
@@ -407,10 +428,65 @@ class AudioService extends ChangeNotifier {
       onError: (Object e, StackTrace st) {
         if (!_originAudio) return; // inactive side — ignore
         if (_isTransitioning || _handlingPlaybackError) return;
-        print('Support playback error: $e');
-        unawaited(_onActiveTrackFailed(_currentSupportTrack));
+        print('Support playback error (waiting for stuck timeout): $e');
+        _onActivePlaybackGlitch();
       },
     );
+  }
+
+  /// Record that the playhead moved forward (resets the stuck clock).
+  void _notePlaybackProgress(Duration pos) {
+    if (!_expectingPlayback) return;
+    if (pos > _lastProgressPosition + const Duration(milliseconds: 150)) {
+      _lastProgressPosition = pos;
+      _lastProgressAt = DateTime.now();
+    }
+  }
+
+  /// Soft error while a track should be playing — try resume once, then let the
+  /// 11s stuck watchdog decide whether to skip.
+  void _onActivePlaybackGlitch() {
+    if (!_expectingPlayback || _isTransitioning) return;
+    // Ensure the stuck clock is running from the last real progress.
+    _lastProgressAt ??= DateTime.now();
+    _ensureStuckWatch();
+    // Best-effort recover without flipping tracks.
+    unawaited(activePlayer.play().catchError((Object _) {}));
+  }
+
+  void _armStuckWatch() {
+    _lastProgressPosition = _currentTime;
+    _lastProgressAt = DateTime.now();
+    _ensureStuckWatch();
+  }
+
+  void _ensureStuckWatch() {
+    _stuckWatchTimer ??= Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => _checkStuckPlayback(),
+    );
+  }
+
+  void _disarmStuckWatch() {
+    _stuckWatchTimer?.cancel();
+    _stuckWatchTimer = null;
+    _lastProgressAt = null;
+    _lastProgressPosition = Duration.zero;
+  }
+
+  void _checkStuckPlayback() {
+    if (!_expectingPlayback || _isTransitioning || _handlingPlaybackError) {
+      return;
+    }
+    final last = _lastProgressAt;
+    if (last == null) return;
+    if (DateTime.now().difference(last) < _stuckTimeout) return;
+
+    print(
+      'Active track stuck for ${_stuckTimeout.inSeconds}s '
+      'at ${_currentTime.inMilliseconds}ms — skipping',
+    );
+    unawaited(_onActiveTrackFailed(activeTrack));
   }
 
   /// Advance only on a real end-of-track (Nuxt `ended` on the active element).
@@ -507,6 +583,8 @@ class AudioService extends ChangeNotifier {
     if (_handlingPlaybackError || _isTransitioning) return;
     if (_consecutiveLoadFailures >= _maxConsecutiveLoadFailures) {
       print('Too many consecutive load failures — stopping auto-skip');
+      _expectingPlayback = false;
+      _disarmStuckWatch();
       _isPlaying = false;
       _isLoading = false;
       notifyListeners();
@@ -515,6 +593,8 @@ class AudioService extends ChangeNotifier {
 
     _handlingPlaybackError = true;
     _consecutiveLoadFailures++;
+    // Reset stuck clock so the replacement track gets a fresh 11s window.
+    _disarmStuckWatch();
     try {
       if (failed != null && !isPlaylistMode) {
         try {
@@ -538,15 +618,19 @@ class AudioService extends ChangeNotifier {
     await playNextMusic(fromUser: false);
   }
 
-  /// Starts playback on the active player and waits until it is actually
-  /// playing (or errors / times out). just_audio's play() future completes
-  /// when playback later *stops*, so we must not await it directly.
+  /// Starts playback on the active player and waits until audio is actually
+  /// ready (or position advances). just_audio's play() future completes when
+  /// playback later *stops*, so we must not await it directly.
+  ///
+  /// Important: do NOT treat `playing + buffering` as success — that cleared
+  /// the loading spinner before any samples were audible.
   Future<void> _playActiveAndConfirm({
-    Duration timeout = const Duration(seconds: 12),
+    Duration timeout = const Duration(seconds: 11),
   }) async {
     final player = activePlayer;
     final completer = Completer<void>();
     StreamSubscription<PlayerState>? stateSub;
+    StreamSubscription<Duration>? positionSub;
     StreamSubscription<PlaybackEvent>? errorSub;
 
     void succeed() {
@@ -557,10 +641,16 @@ class AudioService extends ChangeNotifier {
       if (!completer.isCompleted) completer.completeError(error);
     }
 
+    bool isAudible(PlayerState state) =>
+        state.playing && state.processingState == ProcessingState.ready;
+
     stateSub = player.playerStateStream.listen((state) {
-      if (state.playing &&
-          (state.processingState == ProcessingState.ready ||
-              state.processingState == ProcessingState.buffering)) {
+      if (isAudible(state)) succeed();
+    });
+    // Some devices briefly report buffering even after samples start — treat
+    // a moving playhead as confirmation that sound is out.
+    positionSub = player.positionStream.listen((pos) {
+      if (player.playing && pos > const Duration(milliseconds: 80)) {
         succeed();
       }
     });
@@ -570,9 +660,9 @@ class AudioService extends ChangeNotifier {
     );
 
     try {
-      if (player.playing &&
-          (player.processingState == ProcessingState.ready ||
-              player.processingState == ProcessingState.buffering)) {
+      if (isAudible(player.playerState) ||
+          (player.playing &&
+              player.position > const Duration(milliseconds: 80))) {
         succeed();
       } else {
         unawaited(player.play().catchError((Object e) {
@@ -583,9 +673,12 @@ class AudioService extends ChangeNotifier {
       _consecutiveLoadFailures = 0;
       _isPlaying = true;
       _isLoading = false;
+      _expectingPlayback = true;
+      _armStuckWatch();
       notifyListeners();
     } finally {
       await stateSub.cancel();
+      await positionSub.cancel();
       await errorSub.cancel();
     }
   }
@@ -599,6 +692,8 @@ class AudioService extends ChangeNotifier {
   }
 
   Future<void> pauseAudio() async {
+    _expectingPlayback = false;
+    _disarmStuckWatch();
     await activePlayer.pause();
     _isPlaying = false;
     notifyListeners();
@@ -608,6 +703,8 @@ class AudioService extends ChangeNotifier {
   /// the OS media session (app swiped away / notification dismissed) so
   /// playback and system controls do not linger after the app is closed.
   Future<void> stopAudio() async {
+    _expectingPlayback = false;
+    _disarmStuckWatch();
     await Future.wait([
       _playerPrimary.stop(),
       _playerSupport.stop(),
@@ -619,6 +716,7 @@ class AudioService extends ChangeNotifier {
 
   Future<void> resumeAudio() async {
     _isLoading = true;
+    _expectingPlayback = true;
     notifyListeners();
 
     try {
@@ -658,6 +756,9 @@ class AudioService extends ChangeNotifier {
         DateTime.now().add(const Duration(milliseconds: 1500));
 
     _isLoading = true;
+    _expectingPlayback = true;
+    // Don't let the previous track's stuck clock fire during the flip.
+    _disarmStuckWatch();
     notifyListeners();
 
     var playFailed = false;
@@ -770,6 +871,8 @@ class AudioService extends ChangeNotifier {
     }
 
     _isLoading = true;
+    _expectingPlayback = true;
+    _disarmStuckWatch();
     notifyListeners();
 
     // Pause active player
@@ -817,6 +920,12 @@ class AudioService extends ChangeNotifier {
     _ignoreCompletedUntil =
         DateTime.now().add(const Duration(milliseconds: 600));
     _currentTime = target;
+    // Seek is intentional progress — reset stuck clock so scrubbing cannot
+    // look like a frozen playhead.
+    if (_expectingPlayback) {
+      _lastProgressPosition = target;
+      _lastProgressAt = DateTime.now();
+    }
     // Force a volume re-apply (seek may leave or enter the fade window).
     _lastAppliedPlayerVolume = -1;
     _applyFadeOutVolume(target);
@@ -870,6 +979,7 @@ class AudioService extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disarmStuckWatch();
     _primaryPositionSub?.cancel();
     _primaryDurationSub?.cancel();
     _primaryStateSub?.cancel();

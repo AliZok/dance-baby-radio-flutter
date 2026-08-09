@@ -181,6 +181,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
+      extendBody: true,
+      extendBodyBehindAppBar: true,
       body: ListenableBuilder(
           listenable: widget.audioService,
           builder: (context, child) {
@@ -247,8 +249,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   child: VideoBackground(shouldShow: shouldShowVideo),
                 ),
 
-                // Full-screen, center-cropped cover. The dark translucent layer
-                // keeps it atmospheric while allowing the video to show through.
+                // Full-screen stretched cover — fills edge-to-edge (top/bottom
+                // included). Dark translucent layer keeps it atmospheric while
+                // allowing the video to show through.
                 Positioned.fill(
                   child: Opacity(
                     opacity: shouldShowVideo ? 0.46 : 0.58,
@@ -260,24 +263,39 @@ class _PlayerScreenState extends State<PlayerScreen> {
                       child: AnimatedSwitcher(
                         duration: const Duration(seconds: 1),
                         child: activeTrack?.cover.isNotEmpty == true
-                            ? CachedNetworkImage(
+                            ? SizedBox.expand(
                                 key: ValueKey(activeTrack!.cover),
-                                imageUrl: activeTrack.cover,
-                                fit: BoxFit.cover,
-                                placeholder: (context, url) => Image.asset(
-                                  'assets/images/background-dance-1.jpg',
-                                  fit: BoxFit.cover,
-                                ),
-                                errorWidget: (context, url, error) => Image.asset(
-                                  'assets/images/background-dance-1.jpg',
-                                  fit: BoxFit.cover,
+                                child: CachedNetworkImage(
+                                  imageUrl: activeTrack.cover,
+                                  fit: BoxFit.fill,
+                                  width: double.infinity,
+                                  height: double.infinity,
+                                  alignment: Alignment.center,
+                                  placeholder: (context, url) => Image.asset(
+                                    'assets/images/background-dance-1.jpg',
+                                    fit: BoxFit.fill,
+                                    width: double.infinity,
+                                    height: double.infinity,
+                                    alignment: Alignment.center,
+                                  ),
+                                  errorWidget: (context, url, error) =>
+                                      Image.asset(
+                                    'assets/images/background-dance-1.jpg',
+                                    fit: BoxFit.fill,
+                                    width: double.infinity,
+                                    height: double.infinity,
+                                    alignment: Alignment.center,
+                                  ),
                                 ),
                               )
                             : Image.asset(
-                              'assets/images/background-dance-1.jpg',
-                              key: const ValueKey('default_bg'),
-                              fit: BoxFit.cover,
-                            ),
+                                'assets/images/background-dance-1.jpg',
+                                key: const ValueKey('default_bg'),
+                                fit: BoxFit.fill,
+                                width: double.infinity,
+                                height: double.infinity,
+                                alignment: Alignment.center,
+                              ),
                       ),
                     ),
                   ),
