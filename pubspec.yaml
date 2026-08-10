@@ -1,6 +1,6 @@
 name: dance_baby_radio_flutter
 description: Dance Baby Radio Flutter Android app v2 — radio player, auth, and playlists matching the Nuxt 3 frontend.
-version: 7.0.0+14
+version: 8.0.0+15
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
