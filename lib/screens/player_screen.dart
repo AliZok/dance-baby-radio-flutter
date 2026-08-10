@@ -130,7 +130,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (velocity.abs() < 280) return;
     _closeOverlayMenus();
     widget.audioService.playNextMusic(fromUser: true);
-    AppToast.info(context, 'Skipping to the next track.', title: 'Next');
   }
 
   /// Top→bottom fling → soft app reset (reload tracks + loading splash).
@@ -798,11 +797,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
                       onTap: () {
                         _closeOverlayMenus();
                         widget.audioService.playNextMusic(fromUser: true);
-                        AppToast.info(
-                          context,
-                          'Skipping to the next track.',
-                          title: 'Next',
-                        );
                       },
                       child: AnimatedOpacity(
                         duration: const Duration(milliseconds: 180),

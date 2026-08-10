@@ -2,8 +2,8 @@ import 'package:flutter/material.dart';
 
 /// Lightweight toast matching Nuxt notification stack feel.
 ///
-/// Auto-dismisses after a few seconds. Tap once to keep it on screen;
-/// tap again to dismiss.
+/// Appears from the top. Auto-dismisses after a few seconds. Tap once to
+/// keep it on screen; tap again to dismiss.
 class AppToast {
   static const Duration _autoDismiss = Duration(milliseconds: 3500);
   static const Duration _errorDismiss = Duration(milliseconds: 4000);
@@ -19,10 +19,18 @@ class AppToast {
     final messenger = ScaffoldMessenger.maybeOf(context);
     if (messenger == null) return;
 
+    final media = MediaQuery.of(context);
+    // Floating SnackBars sit at the bottom of the remaining area after
+    // margins — a large bottom inset pins the toast under the status bar.
+    final topInset = media.padding.top + 10;
+    final bottomInset = media.size.height - topInset - 110;
+
     messenger.hideCurrentSnackBar();
     messenger.showSnackBar(
       SnackBar(
         behavior: SnackBarBehavior.floating,
+        dismissDirection: DismissDirection.up,
+        margin: EdgeInsets.fromLTRB(16, topInset, 16, bottomInset),
         backgroundColor: isError
             ? const Color(0xE6222830)
             : const Color(0xE608282C),

@@ -343,6 +343,7 @@ class AudioService extends ChangeNotifier {
         _currentTime = pos;
         _notePlaybackProgress(pos);
         _applyFadeOutVolume(pos);
+        _clearLoadingIfAudible();
         notifyListeners();
       }
     });
@@ -360,14 +361,7 @@ class AudioService extends ChangeNotifier {
       if (_originAudio) return;
 
       _isPlaying = state.playing;
-      // Spinner only while we still have no audible progress. Once the playhead
-      // has moved, brief rebuffer must not hide→show the spinner (that caused a
-      // silent gap right after loading vanished).
-      final hasAudibleProgress =
-          state.playing && _currentTime > const Duration(milliseconds: 80);
-      _isLoading = state.processingState == ProcessingState.loading ||
-          (state.processingState == ProcessingState.buffering &&
-              !hasAudibleProgress);
+      _syncLoadingFromPlayerState(state);
 
       if (state.processingState == ProcessingState.completed) {
         _handleTrackCompleted();
@@ -394,6 +388,7 @@ class AudioService extends ChangeNotifier {
         _currentTime = pos;
         _notePlaybackProgress(pos);
         _applyFadeOutVolume(pos);
+        _clearLoadingIfAudible();
         notifyListeners();
       }
     });
@@ -411,11 +406,7 @@ class AudioService extends ChangeNotifier {
       if (!_originAudio) return;
 
       _isPlaying = state.playing;
-      final hasAudibleProgress =
-          state.playing && _currentTime > const Duration(milliseconds: 80);
-      _isLoading = state.processingState == ProcessingState.loading ||
-          (state.processingState == ProcessingState.buffering &&
-              !hasAudibleProgress);
+      _syncLoadingFromPlayerState(state);
 
       if (state.processingState == ProcessingState.completed) {
         _handleTrackCompleted();
@@ -432,6 +423,32 @@ class AudioService extends ChangeNotifier {
         _onActivePlaybackGlitch();
       },
     );
+  }
+
+  /// Cover spinner: stay visible until the active track is actually playing
+  /// and ready (or the playhead has moved). Once audible, brief rebuffers
+  /// must not flash the spinner again.
+  void _syncLoadingFromPlayerState(PlayerState state) {
+    final hasAudibleProgress =
+        state.playing && _currentTime > const Duration(milliseconds: 80);
+    final isAudiblyStarted = state.playing &&
+        (state.processingState == ProcessingState.ready || hasAudibleProgress);
+
+    if (_expectingPlayback && !isAudiblyStarted) {
+      _isLoading = true;
+      return;
+    }
+
+    // Already started (or not expecting play) — never flash on mid-song rebuffer.
+    _isLoading = false;
+  }
+
+  void _clearLoadingIfAudible() {
+    if (!_isLoading || !_expectingPlayback) return;
+    if (activePlayer.playing &&
+        _currentTime > const Duration(milliseconds: 80)) {
+      _isLoading = false;
+    }
   }
 
   /// Record that the playhead moved forward (resets the stuck clock).
