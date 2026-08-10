@@ -51,6 +51,11 @@ class AudioService extends ChangeNotifier {
   static const Duration _fadeOutDuration = Duration(seconds: 4);
   /// How long position may stall while we expect playback before auto-skip.
   static const Duration _stuckTimeout = Duration(seconds: 11);
+  /// Max wait for inactive preload / API before Next proceeds or recovers.
+  static const Duration _refillWaitTimeout = Duration(seconds: 8);
+  static const Duration _setUrlTimeout = Duration(seconds: 12);
+  /// Cover spinner stuck longer than this → force recovery (hung next/refill).
+  static const Duration _loadingStuckTimeout = Duration(seconds: 14);
   /// Prevents stacked error→skip handlers from fighting over the dual players.
   bool _handlingPlaybackError = false;
   /// Caps auto-skip storms when several bad URLs land in a row.
@@ -58,6 +63,12 @@ class AudioService extends ChangeNotifier {
   static const int _maxConsecutiveLoadFailures = 8;
   /// True while radio should keep producing audio (not user-paused / stopped).
   bool _expectingPlayback = false;
+  /// When cover loading started (for stuck-loading recovery).
+  DateTime? _loadingSince;
+  /// Soft pull-to-refresh already in flight (ignore extra swipes).
+  bool _softRefreshInFlight = false;
+  /// Prevent re-entrant stuck-loading recovery.
+  bool _recoveringFromStuckLoading = false;
   /// Last position that counted as real progress (for stuck detection).
   Duration _lastProgressPosition = Duration.zero;
   /// When position last advanced while we expected playback.
@@ -278,7 +289,9 @@ class AudioService extends ChangeNotifier {
     if (_currentOriginTrack?.audio != null &&
         _currentOriginTrack!.audio.isNotEmpty) {
       try {
-        await _playerPrimary.setUrl(_currentOriginTrack!.audio);
+        await _playerPrimary
+            .setUrl(_currentOriginTrack!.audio)
+            .timeout(_setUrlTimeout);
         // Preload only — never leave the buffer playing.
         await _playerPrimary.pause();
         await _playerPrimary.seek(Duration.zero);
@@ -296,7 +309,9 @@ class AudioService extends ChangeNotifier {
     if (_currentSupportTrack?.audio != null &&
         _currentSupportTrack!.audio.isNotEmpty) {
       try {
-        await _playerSupport.setUrl(_currentSupportTrack!.audio);
+        await _playerSupport
+            .setUrl(_currentSupportTrack!.audio)
+            .timeout(_setUrlTimeout);
         await _playerSupport.pause();
         await _playerSupport.seek(Duration.zero);
       } catch (e) {
@@ -435,19 +450,82 @@ class AudioService extends ChangeNotifier {
         (state.processingState == ProcessingState.ready || hasAudibleProgress);
 
     if (_expectingPlayback && !isAudiblyStarted) {
-      _isLoading = true;
+      _markLoading();
       return;
     }
 
     // Already started (or not expecting play) — never flash on mid-song rebuffer.
+    _markNotLoading();
+  }
+
+  void _markLoading() {
+    _isLoading = true;
+    _loadingSince ??= DateTime.now();
+    _ensureStuckWatch();
+  }
+
+  void _markNotLoading() {
     _isLoading = false;
+    _loadingSince = null;
   }
 
   void _clearLoadingIfAudible() {
     if (!_isLoading || !_expectingPlayback) return;
     if (activePlayer.playing &&
         _currentTime > const Duration(milliseconds: 80)) {
-      _isLoading = false;
+      _markNotLoading();
+    }
+  }
+
+  /// Whether the inactive buffer looks safe to flip onto.
+  bool _inactiveBufferLooksReady() {
+    final track = _originAudio ? _currentOriginTrack : _currentSupportTrack;
+    if (track == null || track.audio.isEmpty) return false;
+    final state = inactivePlayer.processingState;
+    return state == ProcessingState.ready ||
+        state == ProcessingState.buffering ||
+        state == ProcessingState.completed ||
+        (inactivePlayer.duration != null &&
+            inactivePlayer.duration! > Duration.zero);
+  }
+
+  /// Wait briefly for an in-flight refill; if it hangs, invalidate and force
+  /// a fresh inactive preload so Next cannot freeze forever on loading.
+  Future<void> _ensureInactiveReadyForFlip() async {
+    final pending = _refillFuture;
+    if (pending != null) {
+      try {
+        await pending.timeout(_refillWaitTimeout);
+      } on TimeoutException {
+        print('Inactive refill timed out — forcing a fresh preload');
+        _refillGeneration++;
+        _refillFuture = null;
+      } catch (e) {
+        print('Pending inactive refill failed: $e');
+        _refillGeneration++;
+        _refillFuture = null;
+      }
+    }
+
+    if (_inactiveBufferLooksReady()) return;
+
+    print('Inactive buffer not ready — loading a track before flip');
+    try {
+      final replacement = await _fetchNextTrack(excludeTrack: activeTrack)
+          .timeout(_refillWaitTimeout);
+      if (replacement == null) return;
+
+      if (_originAudio) {
+        _currentOriginTrack = replacement;
+        await _preloadPrimary();
+      } else {
+        _currentSupportTrack = replacement;
+        await _preloadSupport();
+      }
+    } on TimeoutException {
+      print('Forced inactive preload timed out');
+    } catch (e) {
+      print('Forced inactive preload failed: $e');
     }
   }
 
@@ -492,6 +570,20 @@ class AudioService extends ChangeNotifier {
   }
 
   void _checkStuckPlayback() {
+    // Hung Next/refill used to leave the cover spinner forever because the
+    // transition lock stayed true and this watchdog refused to run.
+    if (_expectingPlayback && _isLoading) {
+      final since = _loadingSince;
+      if (since != null &&
+          DateTime.now().difference(since) >= _loadingStuckTimeout) {
+        print(
+          'Cover loading stuck for ${_loadingStuckTimeout.inSeconds}s — recovering',
+        );
+        unawaited(_recoverFromStuckLoading());
+        return;
+      }
+    }
+
     if (!_expectingPlayback || _isTransitioning || _handlingPlaybackError) {
       return;
     }
@@ -504,6 +596,23 @@ class AudioService extends ChangeNotifier {
       'at ${_currentTime.inMilliseconds}ms — skipping',
     );
     unawaited(_onActiveTrackFailed(activeTrack));
+  }
+
+  /// Break a frozen Next/refresh: drop hung refill, clear transition lock,
+  /// and skip to a fresh buffer.
+  Future<void> _recoverFromStuckLoading() async {
+    if (_handlingPlaybackError || _recoveringFromStuckLoading) return;
+    _recoveringFromStuckLoading = true;
+    try {
+      _isTransitioning = false;
+      _queuedNext = false;
+      _refillGeneration++;
+      _refillFuture = null;
+      _loadingSince = DateTime.now(); // fresh window for the recovery attempt
+      await _onActiveTrackFailed(activeTrack);
+    } finally {
+      _recoveringFromStuckLoading = false;
+    }
   }
 
   /// Advance only on a real end-of-track (Nuxt `ended` on the active element).
@@ -559,7 +668,7 @@ class AudioService extends ChangeNotifier {
     if (isOriginSide) {
       _currentOriginTrack = replacement;
       try {
-        await _playerPrimary.setUrl(replacement.audio);
+        await _playerPrimary.setUrl(replacement.audio).timeout(_setUrlTimeout);
         await _playerPrimary.pause();
         await _playerPrimary.seek(Duration.zero);
       } catch (e) {
@@ -576,7 +685,7 @@ class AudioService extends ChangeNotifier {
     } else {
       _currentSupportTrack = replacement;
       try {
-        await _playerSupport.setUrl(replacement.audio);
+        await _playerSupport.setUrl(replacement.audio).timeout(_setUrlTimeout);
         await _playerSupport.pause();
         await _playerSupport.seek(Duration.zero);
       } catch (e) {
@@ -603,7 +712,7 @@ class AudioService extends ChangeNotifier {
       _expectingPlayback = false;
       _disarmStuckWatch();
       _isPlaying = false;
-      _isLoading = false;
+      _markNotLoading();
       notifyListeners();
       return;
     }
@@ -689,7 +798,7 @@ class AudioService extends ChangeNotifier {
       await completer.future.timeout(timeout);
       _consecutiveLoadFailures = 0;
       _isPlaying = true;
-      _isLoading = false;
+      _markNotLoading();
       _expectingPlayback = true;
       _armStuckWatch();
       notifyListeners();
@@ -727,12 +836,12 @@ class AudioService extends ChangeNotifier {
       _playerSupport.stop(),
     ]);
     _isPlaying = false;
-    _isLoading = false;
+    _markNotLoading();
     notifyListeners();
   }
 
   Future<void> resumeAudio() async {
-    _isLoading = true;
+    _markLoading();
     _expectingPlayback = true;
     notifyListeners();
 
@@ -740,7 +849,7 @@ class AudioService extends ChangeNotifier {
       await _playActiveAndConfirm();
     } catch (e) {
       print('resumeAudio failed: $e');
-      _isLoading = false;
+      _markNotLoading();
       notifyListeners();
       await _onActiveTrackFailed(activeTrack);
     }
@@ -767,33 +876,30 @@ class AudioService extends ChangeNotifier {
       if (fromUser) _queuedNext = true;
       return;
     }
+
+    _markLoading();
+    _expectingPlayback = true;
+    // Keep the stuck/loading watchdog armed — a hung network refill used to
+    // disarm it and freeze the cover spinner forever.
+    notifyListeners();
+
+    // Resolve inactive buffer BEFORE taking the transition lock so a slow API
+    // cannot block every subsequent Next tap / auto-advance.
+    await _ensureInactiveReadyForFlip();
+
+    if (_isTransitioning) {
+      if (fromUser) _queuedNext = true;
+      return;
+    }
+
     _isTransitioning = true;
     // Suppress completed storms from pause / seek(0) / inactive setUrl.
     _ignoreCompletedUntil =
         DateTime.now().add(const Duration(milliseconds: 1500));
 
-    _isLoading = true;
-    _expectingPlayback = true;
-    // Don't let the previous track's stuck clock fire during the flip.
-    _disarmStuckWatch();
-    notifyListeners();
-
     var playFailed = false;
     try {
-      // Finish any in-flight inactive preload before flipping so we never
-      // land on a half-replaced buffer.
-      final pendingRefill = _refillFuture;
-      if (pendingRefill != null) {
-        try {
-          await pendingRefill;
-        } catch (e) {
-          print('Pending inactive refill failed: $e');
-        }
-      }
-
-      // Nuxt pauseAudio(): pause ONLY the active element — not both. Pausing /
-      // reloading the inactive side while the new track plays was interrupting
-      // playback and triggering another skip mid-song.
+      // Nuxt pauseAudio(): pause ONLY the active element — not both.
       final leaving = activePlayer;
       await leaving.pause();
 
@@ -821,15 +927,15 @@ class AudioService extends ChangeNotifier {
     } catch (e) {
       print('Error playing preloaded track: $e');
       playFailed = true;
-      _isLoading = false;
       _isPlaying = false;
+      // Keep spinner up — recovery path below will clear it on success.
+      _markLoading();
       notifyListeners();
     } finally {
       _isTransitioning = false;
     }
 
-    // Background-refill the side we just left (Nuxt watch(originAudio) /
-    // getRandomNumber*). Keep it paused — preload only.
+    // Background-refill the side we just left. Keep it paused — preload only.
     _scheduleInactiveRefill();
 
     if (_queuedNext) {
@@ -838,8 +944,7 @@ class AudioService extends ChangeNotifier {
       return;
     }
 
-    // Bad URL after the flip: mark it dead and auto-play the *next* track
-    // (Nuxt playBetter catch → flip → playBetter again).
+    // Bad URL after the flip: mark it dead and auto-play the *next* track.
     if (playFailed) {
       await _onActiveTrackFailed(activeTrack);
     }
@@ -859,68 +964,84 @@ class AudioService extends ChangeNotifier {
   }
 
   Future<void> _fetchReplacementForInactivePlayer(int generation) async {
-    final replacement = await _fetchNextTrack(excludeTrack: activeTrack);
-    if (generation != _refillGeneration) return;
-    if (replacement == null) return;
+    try {
+      final replacement = await _fetchNextTrack(excludeTrack: activeTrack)
+          .timeout(_refillWaitTimeout);
+      if (generation != _refillGeneration) return;
+      if (replacement == null) return;
 
-    // Load into the inactive player only. Never call play() here.
-    if (_originAudio) {
-      _currentOriginTrack = replacement;
-      await _preloadPrimary();
-    } else {
-      _currentSupportTrack = replacement;
-      await _preloadSupport();
+      // Load into the inactive player only. Never call play() here.
+      if (_originAudio) {
+        _currentOriginTrack = replacement;
+        await _preloadPrimary();
+      } else {
+        _currentSupportTrack = replacement;
+        await _preloadSupport();
+      }
+      if (generation != _refillGeneration) return;
+      notifyListeners();
+    } on TimeoutException {
+      print('Inactive refill API/preload timed out (gen=$generation)');
+    } catch (e) {
+      print('Inactive refill failed: $e');
     }
-    if (generation != _refillGeneration) return;
-    notifyListeners();
   }
 
   /// Prev (UI / lock-screen / headset) behaves like Next — radio shuffle
   /// never walks history backwards.
   Future<void> playPreviousMusic() => playNextMusic(fromUser: true);
 
-  /// Soft reset: show loading splash, fetch fresh dual buffers, autoplay.
-  /// Keeps genre filters and playlist mode; clears history and transition state.
+  /// Soft refresh (pull-down): one API fetch → load into inactive → flip → play.
+  /// Does not wipe the UI / dual-buffer session like a cold start.
   Future<void> refreshRadio() async {
-    if (_isTransitioning) {
-      _queuedNext = false;
-    }
-    _isTransitioning = true;
+    if (_softRefreshInFlight) return;
+    _softRefreshInFlight = true;
+
     _queuedNext = false;
     _refillGeneration++;
     _refillFuture = null;
-    _expectingPlayback = false;
-    _disarmStuckWatch();
-    _handlingPlaybackError = false;
     _consecutiveLoadFailures = 0;
-    _ignoreCompletedUntil = null;
-    _playbackHistory.clear();
-    _hasStarted = false;
-    _originAudio = false;
-    _isPlaying = false;
-    _isLoading = true;
-    _isAudioReady = false;
-    _currentOriginTrack = null;
-    _currentSupportTrack = null;
-    _currentTime = Duration.zero;
-    _duration = Duration.zero;
+    _markLoading();
+    _expectingPlayback = true;
     notifyListeners();
 
     try {
-      await Future.wait([
-        _playerPrimary.stop(),
-        _playerSupport.stop(),
-      ]);
-    } catch (e) {
-      print('refreshRadio stop error: $e');
-    } finally {
-      _isTransitioning = false;
-    }
+      final replacement = await _fetchNextTrack(excludeTrack: activeTrack)
+          .timeout(_refillWaitTimeout);
+      if (replacement == null) {
+        print('refreshRadio: no track returned');
+        _markNotLoading();
+        notifyListeners();
+        return;
+      }
 
-    await _loadInitialTracks();
-    if (_isAudioReady) {
-      _hasStarted = true;
-      await resumeAudio();
+      // Load the fresh track onto the inactive side, then flip onto it.
+      if (_originAudio) {
+        _currentOriginTrack = replacement;
+        await _preloadPrimary();
+      } else {
+        _currentSupportTrack = replacement;
+        await _preloadSupport();
+      }
+
+      if (!_inactiveBufferLooksReady()) {
+        throw Exception('Refresh preload did not become ready');
+      }
+
+      // Reuse Next flip/play path (inactive is already the track we just loaded).
+      // Clear any pending refill so playNext does not wait on a stale future.
+      _refillFuture = null;
+      await playNextMusic(fromUser: true);
+    } catch (e) {
+      print('refreshRadio failed: $e');
+      _markNotLoading();
+      notifyListeners();
+      // Best-effort: still try a normal next if something is buffered.
+      try {
+        await playNextMusic(fromUser: true);
+      } catch (_) {}
+    } finally {
+      _softRefreshInFlight = false;
     }
   }
 

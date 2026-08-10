@@ -132,7 +132,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     widget.audioService.playNextMusic(fromUser: true);
   }
 
-  /// Top→bottom fling → soft app reset (reload tracks + loading splash).
+  /// Top→bottom fling → soft refresh (one API fetch + play).
   void _onVerticalSwipe(DragEndDetails details) {
     final velocity = details.primaryVelocity ?? 0;
     // Positive primaryVelocity = downward.
@@ -145,7 +145,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _isPlaylistOpen = false;
     });
     widget.audioService.refreshRadio();
-    AppToast.info(context, 'Refreshing the radio stream.', title: 'Refresh');
+    AppToast.info(context, 'Loading a fresh track.', title: 'Refresh');
   }
 
   // Custom SVG path for the exact Repeat icon from the Nuxt project.
