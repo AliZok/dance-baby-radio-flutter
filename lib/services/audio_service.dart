@@ -991,55 +991,55 @@ class AudioService extends ChangeNotifier {
   /// never walks history backwards.
   Future<void> playPreviousMusic() => playNextMusic(fromUser: true);
 
-  /// Soft refresh (pull-down): one API fetch → load into inactive → flip → play.
-  /// Does not wipe the UI / dual-buffer session like a cold start.
+  /// Cold restart (pull-down): same path as opening the app — splash, fresh
+  /// dual buffers from the API, then autoplay. Genre prefs are kept.
   Future<void> refreshRadio() async {
     if (_softRefreshInFlight) return;
     _softRefreshInFlight = true;
 
-    _queuedNext = false;
-    _refillGeneration++;
-    _refillFuture = null;
-    _consecutiveLoadFailures = 0;
-    _markLoading();
-    _expectingPlayback = true;
-    notifyListeners();
-
     try {
-      final replacement = await _fetchNextTrack(excludeTrack: activeTrack)
-          .timeout(_refillWaitTimeout);
-      if (replacement == null) {
-        print('refreshRadio: no track returned');
-        _markNotLoading();
-        notifyListeners();
-        return;
-      }
-
-      // Load the fresh track onto the inactive side, then flip onto it.
-      if (_originAudio) {
-        _currentOriginTrack = replacement;
-        await _preloadPrimary();
-      } else {
-        _currentSupportTrack = replacement;
-        await _preloadSupport();
-      }
-
-      if (!_inactiveBufferLooksReady()) {
-        throw Exception('Refresh preload did not become ready');
-      }
-
-      // Reuse Next flip/play path (inactive is already the track we just loaded).
-      // Clear any pending refill so playNext does not wait on a stale future.
+      _queuedNext = false;
+      _refillGeneration++;
       _refillFuture = null;
-      await playNextMusic(fromUser: true);
-    } catch (e) {
-      print('refreshRadio failed: $e');
-      _markNotLoading();
+      _expectingPlayback = false;
+      _disarmStuckWatch();
+      _handlingPlaybackError = false;
+      _recoveringFromStuckLoading = false;
+      _consecutiveLoadFailures = 0;
+      _ignoreCompletedUntil = null;
+      _playbackHistory.clear();
+      _hasStarted = false;
+      _originAudio = false;
+      _isPlaying = false;
+      _isRepeat = false;
+      _activePlaybackPlaylist = null;
+      _activePlaylistTracks = [];
+      _markLoading();
+      _isAudioReady = false;
+      _currentOriginTrack = null;
+      _currentSupportTrack = null;
+      _currentTime = Duration.zero;
+      _duration = Duration.zero;
+      _isTransitioning = true;
       notifyListeners();
-      // Best-effort: still try a normal next if something is buffered.
+
       try {
-        await playNextMusic(fromUser: true);
-      } catch (_) {}
+        await Future.wait([
+          _playerPrimary.stop(),
+          _playerSupport.stop(),
+          _playerPrimary.setLoopMode(LoopMode.off),
+          _playerSupport.setLoopMode(LoopMode.off),
+        ]);
+      } catch (e) {
+        print('refreshRadio stop error: $e');
+      } finally {
+        _isTransitioning = false;
+      }
+
+      await _loadInitialTracks();
+      if (_isAudioReady) {
+        await startPlayback();
+      }
     } finally {
       _softRefreshInFlight = false;
     }
