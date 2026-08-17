@@ -112,6 +112,16 @@ class AudioService extends ChangeNotifier {
   bool get hasStarted => _hasStarted;
   double get volume => _volume;
 
+  /// True while radio should keep producing audio (not user-paused / stopped).
+  /// Used by the OS media session so lock-screen / Doze does not freeze the
+  /// isolate during the gap between tracks (setUrl / RPC / dual-player flip).
+  bool get expectingPlayback => _expectingPlayback;
+
+  /// Report "playing" to Android even while buffering the next track so the
+  /// foreground service wake-lock stays held with the screen locked.
+  bool get mediaSessionPlaying =>
+      _expectingPlayback || _isPlaying || _isTransitioning;
+
   Duration get currentTime => _currentTime;
   Duration get duration => _duration;
 
@@ -142,6 +152,13 @@ class AudioService extends ChangeNotifier {
     ];
   }
 
+  StreamSubscription<AudioInterruptionEvent>? _interruptionSub;
+  StreamSubscription<void>? _becomingNoisySub;
+  /// After a transient focus loss (call / OEM quirk), resume if we still want audio.
+  bool _resumeAfterInterruption = false;
+  /// Debounce OEM lock-screen pause→play storms.
+  DateTime? _lastUnexpectedResumeAt;
+
   Future<void> initialize() async {
     _isLoading = true;
     notifyListeners();
@@ -149,8 +166,7 @@ class AudioService extends ChangeNotifier {
     // Register as a native music session. This requests the correct Android
     // audio focus and lets playback continue naturally while the app is in the
     // background or the device is locked.
-    final session = await AudioSession.instance;
-    await session.configure(const AudioSessionConfiguration.music());
+    await _configureAudioSession();
 
     // 1. Load genres from SharedPreferences
     final prefs = await SharedPreferences.getInstance();
@@ -169,6 +185,55 @@ class AudioService extends ChangeNotifier {
     await _loadInitialTracks();
     if (_isAudioReady) {
       await startPlayback();
+    }
+  }
+
+  Future<void> _configureAudioSession() async {
+    final session = await AudioSession.instance;
+    // Start from the music preset, but never auto-pause when ducked — some
+    // OEMs briefly duck/steal focus when the screen turns off.
+    await session.configure(
+      AudioSessionConfiguration.music().copyWith(
+        androidWillPauseWhenDucked: false,
+      ),
+    );
+
+    await _interruptionSub?.cancel();
+    _interruptionSub = session.interruptionEventStream.listen((event) {
+      if (event.begin) {
+        // Do NOT pause ourselves here. Some OEMs fire a fake "pause"
+        // interruption when the screen locks; pausing would kill radio until
+        // unlock. Real phone-call focus loss is handled by the platform and
+        // we resume when the interruption ends (or via unexpected-pause recover).
+        if (event.type == AudioInterruptionType.pause ||
+            event.type == AudioInterruptionType.unknown) {
+          _resumeAfterInterruption = _expectingPlayback || _isPlaying;
+        }
+      } else {
+        final shouldResume =
+            _resumeAfterInterruption || _expectingPlayback;
+        _resumeAfterInterruption = false;
+        if (shouldResume && (_expectingPlayback || _hasStarted)) {
+          unawaited(resumeAudio());
+        }
+      }
+    });
+
+    await _becomingNoisySub?.cancel();
+    _becomingNoisySub = session.becomingNoisyEventStream.listen((_) {
+      // Headphones unplugged — pause like a native music app.
+      unawaited(pauseAudio());
+    });
+
+    await session.setActive(true);
+  }
+
+  Future<void> _ensureAudioSessionActive() async {
+    try {
+      final session = await AudioSession.instance;
+      await session.setActive(true);
+    } catch (e) {
+      print('Audio session activate failed: $e');
     }
   }
 
@@ -380,6 +445,8 @@ class AudioService extends ChangeNotifier {
 
       if (state.processingState == ProcessingState.completed) {
         _handleTrackCompleted();
+      } else {
+        _recoverUnexpectedPause(state);
       }
       notifyListeners();
     });
@@ -425,6 +492,8 @@ class AudioService extends ChangeNotifier {
 
       if (state.processingState == ProcessingState.completed) {
         _handleTrackCompleted();
+      } else {
+        _recoverUnexpectedPause(state);
       }
       notifyListeners();
     });
@@ -546,6 +615,28 @@ class AudioService extends ChangeNotifier {
     _lastProgressAt ??= DateTime.now();
     _ensureStuckWatch();
     // Best-effort recover without flipping tracks.
+    unawaited(activePlayer.play().catchError((Object _) {}));
+  }
+
+  /// Some OEMs pause ExoPlayer when the screen locks even though the user did
+  /// not tap pause. If we still want radio, kick playback again immediately.
+  void _recoverUnexpectedPause(PlayerState state) {
+    if (!_expectingPlayback || _isTransitioning || _handlingPlaybackError) {
+      return;
+    }
+    if (_resumeAfterInterruption) return; // phone-call path owns resume
+    if (state.playing) return;
+    if (state.processingState != ProcessingState.ready &&
+        state.processingState != ProcessingState.buffering) {
+      return;
+    }
+    final now = DateTime.now();
+    final last = _lastUnexpectedResumeAt;
+    if (last != null && now.difference(last) < const Duration(milliseconds: 800)) {
+      return;
+    }
+    _lastUnexpectedResumeAt = now;
+    unawaited(_ensureAudioSessionActive());
     unawaited(activePlayer.play().catchError((Object _) {}));
   }
 
@@ -818,6 +909,7 @@ class AudioService extends ChangeNotifier {
   }
 
   Future<void> pauseAudio() async {
+    _resumeAfterInterruption = false;
     _expectingPlayback = false;
     _disarmStuckWatch();
     await activePlayer.pause();
@@ -829,6 +921,7 @@ class AudioService extends ChangeNotifier {
   /// the OS media session (app swiped away / notification dismissed) so
   /// playback and system controls do not linger after the app is closed.
   Future<void> stopAudio() async {
+    _resumeAfterInterruption = false;
     _expectingPlayback = false;
     _disarmStuckWatch();
     await Future.wait([
@@ -841,11 +934,13 @@ class AudioService extends ChangeNotifier {
   }
 
   Future<void> resumeAudio() async {
+    _resumeAfterInterruption = false;
     _markLoading();
     _expectingPlayback = true;
     notifyListeners();
 
     try {
+      await _ensureAudioSessionActive();
       await _playActiveAndConfirm();
     } catch (e) {
       print('resumeAudio failed: $e');
@@ -896,6 +991,8 @@ class AudioService extends ChangeNotifier {
     // Suppress completed storms from pause / seek(0) / inactive setUrl.
     _ignoreCompletedUntil =
         DateTime.now().add(const Duration(milliseconds: 1500));
+
+    await _ensureAudioSessionActive();
 
     var playFailed = false;
     try {
@@ -1120,6 +1217,8 @@ class AudioService extends ChangeNotifier {
   @override
   void dispose() {
     _disarmStuckWatch();
+    _interruptionSub?.cancel();
+    _becomingNoisySub?.cancel();
     _primaryPositionSub?.cancel();
     _primaryDurationSub?.cancel();
     _primaryStateSub?.cancel();

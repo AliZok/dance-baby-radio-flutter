@@ -53,15 +53,15 @@ Future<void> _initializeMediaSession(AudioService audioService) async {
   try {
     await os_audio.AudioService.init(
       builder: () => MediaAudioHandler(audioService),
-      config: const os_audio.AudioServiceConfig(
+      config: os_audio.AudioServiceConfig(
         androidNotificationChannelId: 'com.dancebabyradio.app.audio',
         androidNotificationChannelName: 'Dance Baby Radio',
-        // Keep the media session and its controls alive while paused, so the
-        // user can resume from the lock screen without reopening the app.
-        androidNotificationOngoing: false,
+        // Ongoing + keep-foreground-on-pause: Android must not demote / Doze
+        // the media service when the screen locks or a track is swapping.
+        androidNotificationOngoing: true,
         androidStopForegroundOnPause: false,
-        fastForwardInterval: Duration(seconds: 10),
-        rewindInterval: Duration(seconds: 10),
+        fastForwardInterval: const Duration(seconds: 10),
+        rewindInterval: const Duration(seconds: 10),
       ),
     );
   } catch (error, stackTrace) {

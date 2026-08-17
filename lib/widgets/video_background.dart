@@ -13,7 +13,8 @@ class VideoBackground extends StatefulWidget {
   _VideoBackgroundState createState() => _VideoBackgroundState();
 }
 
-class _VideoBackgroundState extends State<VideoBackground> {
+class _VideoBackgroundState extends State<VideoBackground>
+    with WidgetsBindingObserver {
   VideoPlayerController? _controller;
   bool _isInitialized = false;
   bool _isInitializing = false;
@@ -21,8 +22,26 @@ class _VideoBackgroundState extends State<VideoBackground> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     if (widget.shouldShow) {
       _initializeVideo();
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final controller = _controller;
+    if (controller == null || !_isInitialized) return;
+
+    // Pause the decorative video when the screen locks / app backgrounds so
+    // it cannot steal audio focus from the radio players. Never touch music.
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.detached) {
+      controller.pause();
+    } else if (state == AppLifecycleState.resumed && widget.shouldShow) {
+      controller.play();
     }
   }
 
@@ -41,7 +60,11 @@ class _VideoBackgroundState extends State<VideoBackground> {
     if (_isInitializing || _isInitialized) return;
     _isInitializing = true;
     const videoUrl = 'https://static.vecteezy.com/system/resources/previews/003/769/185/mp4/interstellar-space-travel-universe-to-the-m31-spiral-galaxy-free-video.mp4';
-    final controller = VideoPlayerController.networkUrl(Uri.parse(videoUrl));
+    // mixWithOthers: never take audio focus away from the radio session.
+    final controller = VideoPlayerController.networkUrl(
+      Uri.parse(videoUrl),
+      videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
+    );
     _controller = controller;
     
     try {
@@ -76,6 +99,7 @@ class _VideoBackgroundState extends State<VideoBackground> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _disposeVideo();
     super.dispose();
   }

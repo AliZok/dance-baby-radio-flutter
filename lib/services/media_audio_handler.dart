@@ -16,7 +16,13 @@ class MediaAudioHandler extends BaseAudioHandler with SeekHandler {
 
   void _broadcastState() {
     final track = _audioService.activeTrack;
-    final playing = _audioService.isPlaying;
+    // Keep the foreground service / wake-lock alive across track gaps while
+    // the radio still intends to play (RPC + setUrl + dual-player flip).
+    // Reporting playing=false between songs lets Android Doze freeze Dart
+    // timers/network when the screen is locked — silence forever.
+    final sessionPlaying = _audioService.mediaSessionPlaying;
+    final bufferingNext = _audioService.expectingPlayback &&
+        (_audioService.isLoading || !_audioService.isPlaying);
 
     mediaItem.add(MediaItem(
       id: track?.id.toString() ?? 'dance-baby-radio',
@@ -29,7 +35,7 @@ class MediaAudioHandler extends BaseAudioHandler with SeekHandler {
     playbackState.add(playbackState.value.copyWith(
       controls: [
         MediaControl.skipToPrevious,
-        if (playing) MediaControl.pause else MediaControl.play,
+        if (sessionPlaying) MediaControl.pause else MediaControl.play,
         MediaControl.skipToNext,
       ],
       systemActions: const {
@@ -44,10 +50,10 @@ class MediaAudioHandler extends BaseAudioHandler with SeekHandler {
       androidCompactActionIndices: const [0, 1, 2],
       processingState: track == null
           ? AudioProcessingState.loading
-          : _audioService.isLoading
+          : bufferingNext
               ? AudioProcessingState.buffering
               : AudioProcessingState.ready,
-      playing: playing,
+      playing: sessionPlaying,
       updatePosition: _audioService.currentTime,
       bufferedPosition: _audioService.activePlayer.bufferedPosition,
       speed: _audioService.activePlayer.speed,
