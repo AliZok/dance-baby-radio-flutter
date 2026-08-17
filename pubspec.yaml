@@ -36,6 +36,7 @@ dependencies:
   # Svg support if needed
   flutter_svg: ^2.0.10+1
   audio_session: ^0.1.25
+  permission_handler: ^13.0.1
 
 dev_dependencies:
   flutter_test:

@@ -1,13 +1,18 @@
+import 'dart:io';
+
 import 'package:audio_service/audio_service.dart';
+import 'package:flutter/foundation.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'audio_service.dart' as app;
 
 /// Bridges our custom [app.AudioService] (which manages the dual just_audio
 /// players used for gapless track transitions) to the OS-level media
 /// session via the `audio_service` package. This is what makes play/pause/
-/// next work from the Android lock screen and notification shade, exactly
-/// like a native music app.
+/// next/prev appear on the Android lock screen and notification shade.
 class MediaAudioHandler extends BaseAudioHandler with SeekHandler {
   final app.AudioService _audioService;
+  int? _lastMediaItemId;
+  Duration _lastMediaDuration = Duration.zero;
 
   MediaAudioHandler(this._audioService) {
     _audioService.addListener(_broadcastState);
@@ -16,21 +21,33 @@ class MediaAudioHandler extends BaseAudioHandler with SeekHandler {
 
   void _broadcastState() {
     final track = _audioService.activeTrack;
-    // Keep the foreground service / wake-lock alive across track gaps while
-    // the radio still intends to play (RPC + setUrl + dual-player flip).
-    // Reporting playing=false between songs lets Android Doze freeze Dart
-    // timers/network when the screen is locked — silence forever.
     final sessionPlaying = _audioService.mediaSessionPlaying;
     final bufferingNext = _audioService.expectingPlayback &&
         (_audioService.isLoading || !_audioService.isPlaying);
+    final duration = _audioService.duration;
 
-    mediaItem.add(MediaItem(
-      id: track?.id.toString() ?? 'dance-baby-radio',
-      title: track?.title ?? 'Dance Baby Radio',
-      artist: (track?.artist.isNotEmpty == true) ? track!.artist : 'Dance Baby Radio',
-      artUri: (track != null && track.cover.isNotEmpty) ? Uri.tryParse(track.cover) : null,
-      duration: _audioService.duration,
-    ));
+    // Only push MediaItem when the track (or its duration) changes. Rewriting
+    // it on every position tick can prevent OEMs from attaching lock-screen
+    // transport controls reliably.
+    final trackId = track?.id;
+    if (trackId != _lastMediaItemId ||
+        (duration - _lastMediaDuration).abs() > const Duration(milliseconds: 500)) {
+      _lastMediaItemId = trackId;
+      _lastMediaDuration = duration;
+      mediaItem.add(MediaItem(
+        id: trackId?.toString() ?? 'dance-baby-radio',
+        album: 'Dance Baby Radio',
+        title: track?.title ?? 'Dance Baby Radio',
+        artist: (track?.artist.isNotEmpty == true)
+            ? track!.artist
+            : 'Dance Baby Radio',
+        artUri: (track != null && track.cover.isNotEmpty)
+            ? Uri.tryParse(track.cover)
+            : null,
+        duration: duration > Duration.zero ? duration : null,
+        playable: true,
+      ));
+    }
 
     playbackState.add(playbackState.value.copyWith(
       controls: [
@@ -40,12 +57,11 @@ class MediaAudioHandler extends BaseAudioHandler with SeekHandler {
       ],
       systemActions: const {
         MediaAction.seek,
-        MediaAction.seekBackward,
-        MediaAction.seekForward,
         MediaAction.play,
         MediaAction.pause,
         MediaAction.skipToPrevious,
         MediaAction.skipToNext,
+        MediaAction.stop,
       },
       androidCompactActionIndices: const [0, 1, 2],
       processingState: track == null
@@ -57,6 +73,7 @@ class MediaAudioHandler extends BaseAudioHandler with SeekHandler {
       updatePosition: _audioService.currentTime,
       bufferedPosition: _audioService.activePlayer.bufferedPosition,
       speed: _audioService.activePlayer.speed,
+      queueIndex: 0,
       repeatMode: _audioService.isRepeat
           ? AudioServiceRepeatMode.one
           : AudioServiceRepeatMode.none,
@@ -116,5 +133,19 @@ class MediaAudioHandler extends BaseAudioHandler with SeekHandler {
 
   void dispose() {
     _audioService.removeListener(_broadcastState);
+  }
+}
+
+/// Ask Android 13+ for notification permission so the media-style notification
+/// (and therefore lock-screen play/pause/next/prev) can actually appear.
+Future<void> requestMediaNotificationPermission() async {
+  if (!Platform.isAndroid) return;
+  try {
+    final status = await Permission.notification.status;
+    if (status.isGranted || status.isLimited) return;
+    await Permission.notification.request();
+  } catch (e, st) {
+    // Never block playback startup on a permission dialog failure.
+    debugPrint('Notification permission request failed: $e\n$st');
   }
 }

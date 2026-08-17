@@ -42,11 +42,17 @@ void main() async {
     playlistService: playlistService,
   ));
 
-  // Track loading and the OS media session are independent. Starting them in
-  // parallel prevents a vendor-specific media-service delay from trapping the
-  // UI on its loading screen. Playback itself waits for Let's GO / post-login.
-  unawaited(audioService.initialize());
-  unawaited(_initializeMediaSession(audioService));
+  // Lock-screen / notification transport controls need the media session up
+  // before the first play(), plus Android 13+ notification permission.
+  unawaited(_bootstrapPlayback(audioService));
+}
+
+Future<void> _bootstrapPlayback(AudioService audioService) async {
+  await requestMediaNotificationPermission();
+  await _initializeMediaSession(audioService);
+  // Start radio only after the OS media session exists so play/pause/next/prev
+  // show on the lock screen from the first track.
+  await audioService.initialize();
 }
 
 Future<void> _initializeMediaSession(AudioService audioService) async {
@@ -56,10 +62,14 @@ Future<void> _initializeMediaSession(AudioService audioService) async {
       config: os_audio.AudioServiceConfig(
         androidNotificationChannelId: 'com.dancebabyradio.app.audio',
         androidNotificationChannelName: 'Dance Baby Radio',
+        androidNotificationChannelDescription:
+            'Playback controls on the lock screen and notification shade',
         // Ongoing + keep-foreground-on-pause: Android must not demote / Doze
         // the media service when the screen locks or a track is swapping.
         androidNotificationOngoing: true,
         androidStopForegroundOnPause: false,
+        androidNotificationIcon: 'drawable/ic_stat_music_note',
+        notificationColor: AppColors.surface,
         fastForwardInterval: const Duration(seconds: 10),
         rewindInterval: const Duration(seconds: 10),
       ),
