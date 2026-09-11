@@ -180,8 +180,7 @@ class AudioService extends ChangeNotifier {
       }
     }
 
-    // Fetch + preload tracks, then autoplay. Native apps do not need a
-    // Let's GO / Welcome gate (unlike the web autoplay policy).
+    // Fetch + preload until the first track can start instantly, then play.
     await _loadInitialTracks();
     if (_isAudioReady) {
       await startPlayback();
@@ -305,8 +304,16 @@ class AudioService extends ChangeNotifier {
       await _preloadPrimary();
       await _preloadSupport();
 
+      try {
+        await _waitUntilPlayableInstantly(_playerPrimary);
+      } catch (e) {
+        print('Intro buffer wait failed: $e');
+      }
+
+      // Origin buffer is hot enough to start without a stall.
       _isLoading = false;
-      _isAudioReady = true;
+      _isAudioReady = _playerPrimary.processingState == ProcessingState.ready ||
+          _isHotEnoughToPlay(_playerPrimary);
       notifyListeners();
     } catch (e) {
       print('Error loading initial tracks: $e');
@@ -385,6 +392,75 @@ class AudioService extends ChangeNotifier {
           failed: _currentSupportTrack,
           isOriginSide: false,
         );
+      }
+    }
+  }
+
+  static const Duration _introMinBuffer = Duration(seconds: 6);
+  static const Duration _introWaitTimeout = Duration(seconds: 25);
+
+  bool _isHotEnoughToPlay(AudioPlayer player) {
+    final buffered = player.bufferedPosition;
+    final duration = player.duration;
+    if (duration != null &&
+        duration > Duration.zero &&
+        buffered >= duration - const Duration(milliseconds: 200)) {
+      return true;
+    }
+    return buffered >= _introMinBuffer;
+  }
+
+  /// Hold the boot overlay until the origin player has a real startable buffer
+  /// (same idea as the Nuxt intro wait — not just "metadata loaded").
+  Future<void> _waitUntilPlayableInstantly(AudioPlayer player) async {
+    if (_isHotEnoughToPlay(player)) return;
+
+    final done = Completer<void>();
+    var lastBuffered = player.bufferedPosition;
+    var lastChange = DateTime.now();
+
+    void consider() {
+      if (done.isCompleted) return;
+      final buffered = player.bufferedPosition;
+      if (buffered != lastBuffered) {
+        lastBuffered = buffered;
+        lastChange = DateTime.now();
+      }
+      if (_isHotEnoughToPlay(player)) {
+        done.complete();
+        return;
+      }
+      final stalled =
+          DateTime.now().difference(lastChange) >= const Duration(milliseconds: 1500);
+      if (stalled &&
+          player.processingState == ProcessingState.ready &&
+          buffered >= const Duration(seconds: 2)) {
+        done.complete();
+      }
+    }
+
+    final subs = <StreamSubscription<dynamic>>[
+      player.bufferedPositionStream.listen((_) => consider()),
+      player.playerStateStream.listen((_) => consider()),
+    ];
+    final poll = Timer.periodic(const Duration(milliseconds: 250), (_) => consider());
+    final timeout = Timer(_introWaitTimeout, () {
+      if (done.isCompleted) return;
+      if (player.processingState == ProcessingState.ready &&
+          player.bufferedPosition >= const Duration(seconds: 2)) {
+        done.complete();
+      } else {
+        done.completeError(TimeoutException('intro buffer wait'));
+      }
+    });
+
+    try {
+      await done.future;
+    } finally {
+      poll.cancel();
+      timeout.cancel();
+      for (final sub in subs) {
+        unawaited(sub.cancel());
       }
     }
   }
@@ -935,7 +1011,11 @@ class AudioService extends ChangeNotifier {
 
   Future<void> resumeAudio() async {
     _resumeAfterInterruption = false;
-    _markLoading();
+    // Intro already waited for a hot buffer — don't flash the
+    // cover spinner on the first play().
+    if (!_isHotEnoughToPlay(activePlayer)) {
+      _markLoading();
+    }
     _expectingPlayback = true;
     notifyListeners();
 
