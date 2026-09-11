@@ -8,11 +8,13 @@ import '../services/auth_service.dart';
 import '../services/playlist_service.dart';
 import '../theme/app_colors.dart';
 import '../widgets/stars_background.dart';
+import '../widgets/led_lights_background.dart';
 import '../widgets/video_background.dart';
 import '../widgets/genre_selector.dart';
 import '../widgets/app_header.dart';
 import '../widgets/playlist_selector.dart';
 import '../widgets/app_toast.dart';
+import '../widgets/welcome_overlay.dart';
 
 /// Draws a solid right-pointing triangle (▶), matching the Nuxt frontend's
 /// `.button-icon` CSS-border triangle trick, but as real vector geometry so
@@ -109,17 +111,28 @@ class _PlayerScreenState extends State<PlayerScreen> {
     setState(() => _headerDismissToken++);
   }
 
+  void _revealChrome() {
+    _closeOverlayMenus();
+    if (_showChrome && _showControls) return;
+    setState(() {
+      _showChrome = true;
+      _showControls = true;
+    });
+  }
+
   void _onBackgroundTap() {
     _closeOverlayMenus();
     setState(() {
-      // Page tap toggles all secondary UI together: login, genre, next,
-      // and the player-side controls (volume / repeat / playlist / titles).
-      final show = !(_showChrome || _showControls);
-      _showChrome = show;
-      _showControls = show;
-      if (!show) {
+      // Empty-space tap is the only way to hide the sliding chrome.
+      // If it is already hidden, the same tap reveals it.
+      if (_showChrome || _showControls) {
+        _showChrome = false;
+        _showControls = false;
         _isGenreOpen = false;
         _isPlaylistOpen = false;
+      } else {
+        _showChrome = true;
+        _showControls = true;
       }
     });
   }
@@ -218,53 +231,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
             final volume = widget.audioService.volume;
             final currentTime = widget.audioService.currentTime;
             final duration = widget.audioService.duration;
-            final isAudioReady = widget.audioService.isAudioReady;
+            final hasStarted = widget.audioService.hasStarted;
+
+            if (!hasStarted) {
+              return const WelcomeOverlay();
+            }
 
             // Check if video should be shown
             final shouldShowVideo = activeTrack != null &&
                 (activeTrack.genre.contains('electronic') || activeTrack.genre.contains('relax'));
-
-            // Show loading splash screen if tracks are not loaded yet
-            if (!isAudioReady && activeTrack == null) {
-              return Container(
-                color: Colors.black,
-                width: double.infinity,
-                height: double.infinity,
-                child: Stack(
-                  alignment: Alignment.center,
-                  children: [
-                    // Stars Background
-                    const StarsBackground(),
-                    
-                    // Centered Logo and Loading Spinner
-                    Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Text(
-                          "DANCE BABY RADIO",
-                          style: GoogleFonts.daysOne(
-                            fontSize: 28,
-                            color: const Color(0xFF94D4E3),
-                            shadows: [
-                              Shadow(
-                                color: const Color(0xFFCCFBF7).withOpacity(0.8),
-                                blurRadius: 15,
-                              ),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(height: 30),
-                        const SpinKitRing(
-                          color: Color(0xFF64EEFF),
-                          size: 50,
-                          lineWidth: 2,
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              );
-            }
 
             return Stack(
               children: [
@@ -330,6 +305,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   child: Opacity(
                     opacity: 0.5,
                     child: StarsBackground(),
+                  ),
+                ),
+
+                // LED light-dance equalizer (mirrors Nuxt LedLights) — sits
+                // above stars, below chrome, and ignores pointer events.
+                Positioned.fill(
+                  child: LedLightsBackground(
+                    audioService: widget.audioService,
                   ),
                 ),
 
@@ -504,20 +487,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                           // the card.
                           padding: const EdgeInsets.only(top: 55),
                           child: GestureDetector(
-                            onTap: () {
-                              _closeOverlayMenus();
-                              setState(() {
-                                // Tap on the player card reveals the same
-                                // secondary controls as a page tap.
-                                final show = !(_showChrome || _showControls);
-                                _showChrome = show;
-                                _showControls = show;
-                                if (!show) {
-                                  _isGenreOpen = false;
-                                  _isPlaylistOpen = false;
-                                }
-                              });
-                            },
+                            onTap: _revealChrome,
                             onHorizontalDragEnd: _onHorizontalSwipe,
                             onVerticalDragEnd: _onVerticalSwipe,
                             child: Container(
@@ -593,7 +563,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                       if (!isLoading)
                                         GestureDetector(
                                           behavior: HitTestBehavior.opaque,
-                                          onTap: widget.audioService.playMusic,
+                                          onTap: () {
+                                            _revealChrome();
+                                            widget.audioService.playMusic();
+                                          },
                                           child: Opacity(
                                             opacity: isPlaying ? 0 : 0.4,
                                             child: Container(
