@@ -54,8 +54,8 @@ class AudioService extends ChangeNotifier {
   /// Max wait for inactive preload / API before Next proceeds or recovers.
   static const Duration _refillWaitTimeout = Duration(seconds: 8);
   static const Duration _setUrlTimeout = Duration(seconds: 12);
-  /// Cover spinner stuck longer than this → force recovery (hung next/refill).
-  static const Duration _loadingStuckTimeout = Duration(seconds: 14);
+  /// Cover spinner stuck longer than this → force skip to next track.
+  static const Duration _loadingStuckTimeout = Duration(seconds: 13);
   /// Prevents stacked error→skip handlers from fighting over the dual players.
   bool _handlingPlaybackError = false;
   /// Caps auto-skip storms when several bad URLs land in a row.
@@ -67,8 +67,9 @@ class AudioService extends ChangeNotifier {
   DateTime? _loadingSince;
   /// Soft pull-to-refresh already in flight (ignore extra swipes).
   bool _softRefreshInFlight = false;
-  /// Prevent re-entrant stuck-loading recovery.
-  bool _recoveringFromStuckLoading = false;
+  /// Bumped on each loading-stuck recovery so a hung playNext cannot block
+  /// the next 13s watchdog fire (the old bool reentrancy lock did that).
+  int _loadingRecoveryGeneration = 0;
   /// Last position that counted as real progress (for stuck detection).
   Duration _lastProgressPosition = Duration.zero;
   /// When position last advanced while we expected playback.
@@ -604,8 +605,11 @@ class AudioService extends ChangeNotifier {
   }
 
   void _markLoading() {
+    // New loading episode → restart the 13s clock (do not keep an old stamp).
+    if (!_isLoading || _loadingSince == null) {
+      _loadingSince = DateTime.now();
+    }
     _isLoading = true;
-    _loadingSince ??= DateTime.now();
     _ensureStuckWatch();
   }
 
@@ -737,14 +741,14 @@ class AudioService extends ChangeNotifier {
   }
 
   void _checkStuckPlayback() {
-    // Hung Next/refill used to leave the cover spinner forever because the
-    // transition lock stayed true and this watchdog refused to run.
+    // Loading > 13s → always force next, even mid-transition. A hung
+    // playNext/refill used to keep the cover spinner forever.
     if (_expectingPlayback && _isLoading) {
-      final since = _loadingSince;
-      if (since != null &&
-          DateTime.now().difference(since) >= _loadingStuckTimeout) {
+      _loadingSince ??= DateTime.now();
+      final since = _loadingSince!;
+      if (DateTime.now().difference(since) >= _loadingStuckTimeout) {
         print(
-          'Cover loading stuck for ${_loadingStuckTimeout.inSeconds}s — recovering',
+          'Cover loading stuck for ${_loadingStuckTimeout.inSeconds}s — forcing next',
         );
         unawaited(_recoverFromStuckLoading());
         return;
@@ -765,20 +769,36 @@ class AudioService extends ChangeNotifier {
     unawaited(_onActiveTrackFailed(activeTrack));
   }
 
-  /// Break a frozen Next/refresh: drop hung refill, clear transition lock,
-  /// and skip to a fresh buffer.
+  /// Break a frozen Next/refresh: drop hung refill, clear locks, skip now.
   Future<void> _recoverFromStuckLoading() async {
-    if (_handlingPlaybackError || _recoveringFromStuckLoading) return;
-    _recoveringFromStuckLoading = true;
+    final generation = ++_loadingRecoveryGeneration;
+
+    // Blow past any stuck transition / error lock so Next can run.
+    _isTransitioning = false;
+    _handlingPlaybackError = false;
+    _queuedNext = false;
+    _refillGeneration++;
+    _refillFuture = null;
+    // Fresh 13s window for this recovery attempt (and any later hang).
+    _loadingSince = DateTime.now();
+    _isLoading = true;
+    _ensureStuckWatch();
+    notifyListeners();
+
+    print('Forcing next track after loading timeout (gen $generation)');
+
     try {
-      _isTransitioning = false;
-      _queuedNext = false;
-      _refillGeneration++;
-      _refillFuture = null;
-      _loadingSince = DateTime.now(); // fresh window for the recovery attempt
-      await _onActiveTrackFailed(activeTrack);
-    } finally {
-      _recoveringFromStuckLoading = false;
+      // Call Next directly — _onActiveTrackFailed can no-op when a concurrent
+      // transition flips _isTransitioning back on, which left users stuck.
+      await playNextMusic(fromUser: false);
+    } catch (e) {
+      print('Loading-stuck recovery failed: $e');
+      if (identical(generation, _loadingRecoveryGeneration) ||
+          generation == _loadingRecoveryGeneration) {
+        // Keep spinner + clock so the watchdog can fire again in 13s.
+        _markLoading();
+        _loadingSince = DateTime.now();
+      }
     }
   }
 
@@ -1052,6 +1072,8 @@ class AudioService extends ChangeNotifier {
       return;
     }
 
+    final recoveryGenAtStart = _loadingRecoveryGeneration;
+
     _markLoading();
     _expectingPlayback = true;
     // Keep the stuck/loading watchdog armed — a hung network refill used to
@@ -1061,6 +1083,11 @@ class AudioService extends ChangeNotifier {
     // Resolve inactive buffer BEFORE taking the transition lock so a slow API
     // cannot block every subsequent Next tap / auto-advance.
     await _ensureInactiveReadyForFlip();
+
+    // A 13s loading recovery may have started a newer Next while we waited.
+    if (recoveryGenAtStart != _loadingRecoveryGeneration) {
+      return;
+    }
 
     if (_isTransitioning) {
       if (fromUser) _queuedNext = true;
@@ -1181,7 +1208,7 @@ class AudioService extends ChangeNotifier {
       _expectingPlayback = false;
       _disarmStuckWatch();
       _handlingPlaybackError = false;
-      _recoveringFromStuckLoading = false;
+      _loadingRecoveryGeneration++;
       _consecutiveLoadFailures = 0;
       _ignoreCompletedUntil = null;
       _playbackHistory.clear();
