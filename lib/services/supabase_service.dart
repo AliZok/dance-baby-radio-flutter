@@ -38,23 +38,26 @@ class SupabaseService {
     }
   }
 
-  /// Picks one random active track, optionally avoiding `excludeTrack`
+  /// Picks one random active track, optionally avoiding `excludeTrack`.
+  ///
+  /// Mirrors the web `getRandomActiveMusic` exactly: retry **once** on an
+  /// id collision and then hand back the duplicate. Returning `null` after
+  /// several collisions (the old behaviour) silently stalled the shuffle and the
+  /// live station whenever the filtered catalogue is small — the second player
+  /// simply never got a track.
   Future<Music?> getRandomActiveMusic({
     required List<String> genreFilters,
     Music? excludeTrack,
   }) async {
-    // Random SQL selection can legitimately return the excluded song more
-    // than once. Retry a few times and never report that duplicate as a valid
-    // replacement for the other player.
-    for (var attempt = 0; attempt < 5; attempt++) {
-      final selected = await getRandomTrack(genreFilters);
-      if (selected == null) return null;
-      if (excludeTrack == null || selected.id != excludeTrack.id) {
-        return selected;
-      }
+    final selected = await getRandomTrack(genreFilters);
+    if (selected == null) return null;
+
+    if (excludeTrack != null && selected.id == excludeTrack.id) {
+      final retry = await getRandomTrack(genreFilters);
+      if (retry != null) return retry;
     }
 
-    return null;
+    return selected;
   }
 
   /// Updates track details (e.g. marking it inactive on error)

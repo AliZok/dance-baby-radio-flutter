@@ -102,11 +102,26 @@ class LiveService {
 
   /// Picks a random active track from the live genre pool, optionally avoiding
   /// [excludeTrack] so we never re-queue the same song back-to-back.
+  ///
+  /// The extra *audio-url* comparison (not just the id) mirrors the web
+  /// `pickStationTrack`: the same recording can exist under two row ids, and
+  /// publishing it again would make the station look "new" while sounding
+  /// identical to what every listener is already hearing.
   Future<Music?> pickStationTrack({Music? excludeTrack}) async {
     final selected = await _musicApi.getRandomActiveMusic(
       genreFilters: liveGenreFilters,
       excludeTrack: excludeTrack,
     );
+    if (selected == null) return null;
+
+    if (excludeTrack != null &&
+        excludeTrack.audio.isNotEmpty &&
+        selected.audio == excludeTrack.audio) {
+      final retry = await _musicApi.getRandomActiveMusic(
+        genreFilters: liveGenreFilters,
+      );
+      if (retry?.audio.isNotEmpty == true) return retry;
+    }
     return selected;
   }
 

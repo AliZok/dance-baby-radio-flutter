@@ -76,6 +76,8 @@ class PlaylistSelectorState extends State<PlaylistSelector> {
         _playlists = [];
         _trackPlaylistIds = [];
       });
+      // Nuxt `watch(isLoggedIn)`: signing out also collapses the open menu.
+      widget.onOpenChanged(false);
     }
     _overlayEntry?.markNeedsBuild();
   }
@@ -239,7 +241,8 @@ class PlaylistSelectorState extends State<PlaylistSelector> {
     final track = widget.audioService.activeTrack;
     if (track == null || _busy) return;
 
-    final name = playlist.name;
+    final name = playlist.name.isEmpty ? 'Untitled' : playlist.name;
+    final trackTitle = track.title.isEmpty ? 'Track' : track.title;
     final already = _trackPlaylistIds.contains(playlist.id);
     setState(() => _busy = true);
     _overlayEntry?.markNeedsBuild();
@@ -262,7 +265,7 @@ class PlaylistSelectorState extends State<PlaylistSelector> {
       });
       AppToast.success(
         context,
-        '“${track.title}” removed from “$name”.',
+        '“$trackTitle” removed from “$name”.',
         title: 'Removed from playlist',
       );
       _overlayEntry?.markNeedsBuild();
@@ -281,7 +284,7 @@ class PlaylistSelectorState extends State<PlaylistSelector> {
     setState(() => _trackPlaylistIds = [..._trackPlaylistIds, playlist.id]);
     AppToast.success(
       context,
-      '“${track.title}” added to “$name”.',
+      '“$trackTitle” added to “$name”.',
       title: 'Added to playlist',
     );
     _overlayEntry?.markNeedsBuild();
@@ -289,6 +292,7 @@ class PlaylistSelectorState extends State<PlaylistSelector> {
 
   Future<void> _playFromPlaylist(Playlist playlist) async {
     if (_busy) return;
+    final plName = playlist.name.isEmpty ? 'Untitled' : playlist.name;
 
     if (widget.audioService.activePlaybackPlaylist?.id == playlist.id) {
       setState(() => _busy = true);
@@ -320,7 +324,7 @@ class PlaylistSelectorState extends State<PlaylistSelector> {
         if (mounted) {
           AppToast.error(
             context,
-            '“${playlist.name}” has no playable tracks yet.',
+            '“$plName” has no playable tracks yet.',
             title: 'Empty playlist',
           );
         }
@@ -331,7 +335,7 @@ class PlaylistSelectorState extends State<PlaylistSelector> {
       if (mounted) {
         AppToast.success(
           context,
-          'Now playing from “${playlist.name}”.',
+          'Now playing from “$plName”.',
           title: 'Playlist',
         );
       }
@@ -349,7 +353,10 @@ class PlaylistSelectorState extends State<PlaylistSelector> {
     final nav = Navigator.of(context);
     await nav.push(
       MaterialPageRoute(
-        builder: (_) => LoginScreen(authService: widget.authService),
+        builder: (_) => LoginScreen(
+          authService: widget.authService,
+          audioService: widget.audioService,
+        ),
       ),
     );
     if (mounted && widget.authService.isLoggedIn) {
@@ -364,6 +371,7 @@ class PlaylistSelectorState extends State<PlaylistSelector> {
       MaterialPageRoute(
         builder: (_) => PlaylistsScreen(
           authService: widget.authService,
+          audioService: widget.audioService,
           playlistService: widget.playlistService,
         ),
       ),
@@ -486,8 +494,9 @@ class PlaylistSelectorState extends State<PlaylistSelector> {
 
   @override
   Widget build(BuildContext context) {
-    final activeSourceId = widget.audioService.activePlaybackPlaylist?.id;
-    final iconActive = _isInAnyPlaylist || activeSourceId != null;
+    // Nuxt binds the playlist icon's `.active` class to `isInAnyPlaylist` only
+    // — playing *from* a playlist is shown by that row's pause icon instead.
+    final iconActive = _isInAnyPlaylist;
 
     // Frontend `.control-item`: 44×44, border-radius 7px
     return SizedBox(

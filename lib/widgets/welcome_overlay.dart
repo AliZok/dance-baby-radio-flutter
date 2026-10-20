@@ -3,10 +3,19 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
-/// Matches the Nuxt WelcomeModal LOADING look (grid + scanlines + spinner).
-/// Flutter has no Let's GO gate: this stays up until audio can start instantly.
+/// Matches the Nuxt WelcomeModal: the cyber grid + scanlines sit behind a
+/// "LOADING..." badge until a track can start instantly, then the hologram
+/// "Let's GO" button appears and the gate is only released by a tap on it
+/// (that tap is the app's first play() call, exactly like the web).
 class WelcomeOverlay extends StatefulWidget {
-  const WelcomeOverlay({super.key});
+  final bool isReady;
+  final VoidCallback onLetsGo;
+
+  const WelcomeOverlay({
+    super.key,
+    required this.isReady,
+    required this.onLetsGo,
+  });
 
   @override
   State<WelcomeOverlay> createState() => _WelcomeOverlayState();
@@ -55,15 +64,27 @@ class _WelcomeOverlayState extends State<WelcomeOverlay>
     super.dispose();
   }
 
+  void _handleTap() {
+    if (!widget.isReady) return;
+    widget.onLetsGo();
+  }
+
   @override
   Widget build(BuildContext context) {
     final bottomInset = MediaQuery.paddingOf(context).bottom;
 
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: Stack(
-        fit: StackFit.expand,
-        children: [
+    // Frontend: `.WelcomeModal { background: rgba(0,0,0,.922) }` once ready,
+    // pure `#000` while loading; tapping anywhere releases the gate.
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: _handleTap,
+      child: ColoredBox(
+        color: widget.isReady
+            ? const Color(0xEB000000)
+            : const Color(0xFF000000),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
           AnimatedBuilder(
             animation: _gridController,
             builder: (context, _) {
@@ -109,10 +130,12 @@ class _WelcomeOverlayState extends State<WelcomeOverlay>
           _ScanLine(controller: _scanController, delay: 0, opacity: 1),
           _ScanLine(controller: _scanController, delay: 0.33, opacity: 0.35),
           Center(
-            child: _LoadingBadge(
-              spin: _spinController,
-              pulse: _pulseController,
-            ),
+            child: widget.isReady
+                ? _LetsGoBadge(pulse: _pulseController)
+                : _LoadingBadge(
+                    spin: _spinController,
+                    pulse: _pulseController,
+                  ),
           ),
           Positioned(
             left: 0,
@@ -134,7 +157,73 @@ class _WelcomeOverlayState extends State<WelcomeOverlay>
               ),
             ),
           ),
-        ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The hologram "Let's GO" button (Nuxt `button.hologram` — 240×230, 2px cyan
+/// border, blurred cyan glow). Hover/press grows the label, matching the CSS.
+class _LetsGoBadge extends StatefulWidget {
+  final Animation<double> pulse;
+
+  const _LetsGoBadge({required this.pulse});
+
+  @override
+  State<_LetsGoBadge> createState() => _LetsGoBadgeState();
+}
+
+class _LetsGoBadgeState extends State<_LetsGoBadge> {
+  bool _pressed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: widget.pulse,
+      builder: (context, child) {
+        final t = widget.pulse.value;
+        return Container(
+          width: 240,
+          height: 230,
+          decoration: BoxDecoration(
+            color: const Color(0x1A00FFFF),
+            borderRadius: BorderRadius.circular(4),
+            border: Border.all(color: const Color(0x8000FFFF), width: 2),
+            boxShadow: [
+              BoxShadow(
+                color: (_pressed
+                        ? const Color(0x7AC7387E)
+                        : const Color(0x4D00FFFF))
+                    .withOpacity(0.6 + 0.4 * t),
+                blurRadius: _pressed ? 26 : 15,
+                spreadRadius: _pressed ? 6 : 0,
+              ),
+            ],
+          ),
+          alignment: Alignment.center,
+          child: child,
+        );
+      },
+      child: Listener(
+        behavior: HitTestBehavior.translucent,
+        onPointerDown: (_) => setState(() => _pressed = true),
+        onPointerUp: (_) => setState(() => _pressed = false),
+        onPointerCancel: (_) => setState(() => _pressed = false),
+        child: Text(
+          "Let's GO",
+          style: GoogleFonts.orbitron(
+            fontSize: _pressed ? 26 : 19,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 2,
+            color: Colors.white,
+            shadows: const [
+              Shadow(color: Color(0xCC00FFCC), blurRadius: 10),
+              Shadow(color: Color(0x8000FFFF), blurRadius: 16),
+            ],
+          ),
+        ),
       ),
     );
   }

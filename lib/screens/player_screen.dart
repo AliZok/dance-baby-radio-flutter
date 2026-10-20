@@ -91,9 +91,53 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _isScrubbing = false;
   double _scrubSeconds = 0;
   int _headerDismissToken = 0;
+  bool _wasLiveMode = false;
 
   static const _chromeDuration = Duration(milliseconds: 340);
   static const _chromeCurve = Curves.easeOutCubic;
+
+  @override
+  void initState() {
+    super.initState();
+    // The web raises mode / player toasts from inside its own functions, not
+    // from the button handler, so a deferred LIVE request still announces
+    // itself when the gate releases. Hand the same ability to AudioService.
+    widget.audioService.onToast = (message, title, kind) {
+      if (!mounted) return;
+      switch (kind) {
+        case ServiceToastKind.error:
+          AppToast.error(context, message, title: title);
+        case ServiceToastKind.warning:
+          AppToast.warning(context, message, title: title);
+        case ServiceToastKind.success:
+          AppToast.success(context, message, title: title);
+        case ServiceToastKind.info:
+          AppToast.info(context, message, title: title);
+      }
+    };
+    // Nuxt `enterLiveMode()` sets `openGenres = false`. The GENRE button itself
+    // disappears in live mode, so a stale open flag would pop the menu back
+    // open the moment the user returns to shuffle.
+    _wasLiveMode = widget.audioService.isLiveMode;
+    widget.audioService.addListener(_onAudioServiceChanged);
+  }
+
+  void _onAudioServiceChanged() {
+    final live = widget.audioService.isLiveMode;
+    if (live && !_wasLiveMode && _isGenreOpen) {
+      setState(() => _isGenreOpen = false);
+    }
+    _wasLiveMode = live;
+  }
+
+  @override
+  void dispose() {
+    widget.audioService.removeListener(_onAudioServiceChanged);
+    if (widget.audioService.onToast != null) {
+      widget.audioService.onToast = null;
+    }
+    super.dispose();
+  }
 
   String _formatDuration(Duration duration) {
     final minutes = duration.inMinutes;
@@ -135,30 +179,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
         _showControls = true;
       }
     });
-  }
-
-  /// Left/right fling → next track (prev is also next everywhere).
-  void _onHorizontalSwipe(DragEndDetails details) {
-    final velocity = details.primaryVelocity ?? 0;
-    if (velocity.abs() < 280) return;
-    _closeOverlayMenus();
-    widget.audioService.playNextMusic(fromUser: true);
-  }
-
-  /// Top→bottom fling → cold restart (same as opening the app).
-  void _onVerticalSwipe(DragEndDetails details) {
-    final velocity = details.primaryVelocity ?? 0;
-    // Positive primaryVelocity = downward.
-    if (velocity < 420) return;
-    _closeOverlayMenus();
-    setState(() {
-      _showChrome = false;
-      _showControls = false;
-      _isGenreOpen = false;
-      _isPlaylistOpen = false;
-    });
-    widget.audioService.refreshRadio();
-    AppToast.info(context, 'Reloading the app from the start.', title: 'Restart');
   }
 
   // Custom SVG path for the exact Repeat icon from the Nuxt project.
@@ -231,11 +251,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
             final volume = widget.audioService.volume;
             final currentTime = widget.audioService.currentTime;
             final duration = widget.audioService.duration;
-            final hasStarted = widget.audioService.hasStarted;
-
-            if (!hasStarted) {
-              return const WelcomeOverlay();
-            }
+            final isLiveMode = widget.audioService.isLiveMode;
+            final showLetsGo = widget.audioService.showLetsGoGate;
 
             // Check if video should be shown
             final shouldShowVideo = activeTrack != null &&
@@ -316,14 +333,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   ),
                 ),
 
-                // Captures empty-page taps + swipes; interactive controls are
-                // painted later in this Stack and therefore win hit testing.
+                // Captures empty-page taps; interactive controls are painted
+                // later in this Stack and therefore win hit testing. The mobile
+                // web only toggles chrome on a tap — no swipe shortcuts.
                 Positioned.fill(
                   child: GestureDetector(
                     behavior: HitTestBehavior.opaque,
                     onTap: _onBackgroundTap,
-                    onHorizontalDragEnd: _onHorizontalSwipe,
-                    onVerticalDragEnd: _onVerticalSwipe,
                   ),
                 ),
 
@@ -438,12 +454,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                           await widget.audioService.toggleRepeat();
                                           if (!mounted) return;
                                           final on = widget.audioService.isRepeat;
+                                          // Nuxt toggleRepeat() copy.
                                           AppToast.info(
                                             this.context,
                                             on
-                                                ? 'This track will loop.'
-                                                : 'Repeat turned off.',
-                                            title: 'Repeat',
+                                                ? 'This track will repeat when it ends.'
+                                                : 'Repeat off — next track will play as usual.',
+                                            title: on ? 'Repeat on' : 'Repeat off',
                                           );
                                         },
                                         behavior: HitTestBehavior.opaque,
@@ -488,8 +505,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
                           padding: const EdgeInsets.only(top: 55),
                           child: GestureDetector(
                             onTap: _revealChrome,
-                            onHorizontalDragEnd: _onHorizontalSwipe,
-                            onVerticalDragEnd: _onVerticalSwipe,
                             child: Container(
                             width: 300,
                             padding: const EdgeInsets.fromLTRB(18, 40, 18, 18),
@@ -601,7 +616,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                 // Seek Slider — commit on finger-up only
                                 // (Nuxt: isSeeking + seek on change), so a
                                 // drag cannot race into the next track.
-                                SliderTheme(
+                                // Nuxt `:disabled="isLiveMode"` +
+                                // `.slider.live-locked { pointer-events: none;
+                                // opacity: .55 }` — the station clock is not
+                                // ours to scrub, and the thumb must not move.
+                                Opacity(
+                                  opacity: isLiveMode ? 0.55 : 1.0,
+                                  child: IgnorePointer(
+                                    ignoring: isLiveMode,
+                                    child: SliderTheme(
                                   data: SliderTheme.of(context).copyWith(
                                     activeTrackColor: const Color(0xFF58D1EF),
                                     inactiveTrackColor: Colors.white24,
@@ -643,6 +666,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                         Duration(seconds: val.toInt()),
                                       );
                                     },
+                                  ),
+                                    ),
                                   ),
                                 ),
 
@@ -732,10 +757,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   ),
                 ),
 
-                // 6. Genre — hidden in playlist and live mode (station uses a
-                // fixed genre pool); slides in from left edge
-                if (!widget.audioService.isPlaylistMode &&
-                    !widget.audioService.isLiveMode)
+                // 6. Genre — Nuxt `v-show="!isLiveMode"`: hidden only in live
+                // mode (a playlist is still a valid shuffle source); slides in
+                // from the left edge with the chrome.
+                if (!isLiveMode)
                   AnimatedPositioned(
                     duration: _chromeDuration,
                     curve: _chromeCurve,
@@ -756,8 +781,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
                     ),
                   ),
 
-                // 7. Next — slides in from right edge
-                AnimatedPositioned(
+                // 7. Next — Nuxt `v-show="!isLiveMode"`: the shared live
+                // station is not ours to skip, so the button disappears in live
+                // mode. Slides in from the right edge with the chrome.
+                if (!isLiveMode)
+                  AnimatedPositioned(
                   duration: _chromeDuration,
                   curve: _chromeCurve,
                   bottom: 27 + MediaQuery.of(context).padding.bottom,
@@ -833,7 +861,21 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   playlistService: widget.playlistService,
                   dismissToken: _headerDismissToken,
                   visible: _showChrome,
+                  onChromeTap: _revealChrome,
                 ),
+
+                // Nuxt WelcomeModal: teleported above every piece of chrome and
+                // only released by a "Let's GO" tap (which is also the first
+                // play() call). Blocks all player taps while it is up, exactly
+                // like the web's `onMobilePageClick` early-return on letsGoModal.
+                if (showLetsGo)
+                  Positioned.fill(
+                    child: WelcomeOverlay(
+                      isReady: activeTrack != null &&
+                          widget.audioService.isAudioReady,
+                      onLetsGo: () => widget.audioService.playMusic(),
+                    ),
+                  ),
               ],
             );
           },

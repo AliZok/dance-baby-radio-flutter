@@ -38,13 +38,10 @@ class LiveStation {
     final idRaw = json['id'];
     final id = idRaw is int ? idRaw : int.tryParse('$idRaw') ?? 0;
 
-    final startedRaw = json['startedAt'] ?? json['started_at'];
-    String? startedAt;
-    if (startedRaw is DateTime) {
-      startedAt = startedRaw.toIso8601String();
-    } else if (startedRaw != null) {
-      startedAt = startedRaw.toString();
-    }
+    // Normalize to a single canonical UTC string. See [_normalizeStartedAt]:
+    // without this the live loop mistakes a fresh track for an expired one and
+    // advances forever.
+    final startedAt = _normalizeStartedAt(json['startedAt'] ?? json['started_at']);
 
     final starRaw = json['star'] ?? json['score'];
     double? star;
@@ -87,8 +84,18 @@ class LiveStation {
   }
 
   /// Identity used to detect whether a station row actually changed — the audio
-  /// url plus the startedAt stamp (same as the frontend liveRowIdentity).
-  String get identity => audio.isEmpty ? '' : '$audio|${startedAt ?? ''}';
+  /// url plus a canonical started-at stamp. We key off the parsed epoch instead
+  /// of the raw string so the SAME row delivered by REST (poll) and by realtime
+  /// (different text format) compares equal — otherwise every poll would look
+  /// like a new track and re-trigger the live logic.
+  String get identity {
+    if (audio.isEmpty) return '';
+    final dt = startedAt == null ? null : DateTime.tryParse(startedAt!);
+    final stamp = dt == null
+        ? (startedAt ?? '')
+        : dt.toUtc().microsecondsSinceEpoch.toString();
+    return '$audio|$stamp';
+  }
 
   /// Convert to a [Music] so the existing player/preload code can play it.
   Music toMusic() {
@@ -122,6 +129,38 @@ class LiveStation {
 
   // ---- Static helpers mirroring useLiveRadio.js ----
 
+  /// Canonicalizes a `startedAt` value coming from Supabase to a single UTC ISO
+  /// string.
+  ///
+  /// The catch this fixes: PostgREST (poll) returns `startedAt` with a `+00:00`
+  /// offset, but Supabase **realtime** returns it offset-less
+  /// (`2026-10-20 12:00:00.123456`). Dart's `DateTime.parse` treats an
+  /// offset-less string as LOCAL time, so on a non-UTC device every realtime
+  /// echo looks hours in the past → `isTrackExpired` says "expired" → the live
+  /// loop advances → publishes → gets echoed back → advances again (the reported
+  /// "changes music in a loop"). Since the DB session timezone is UTC and every
+  /// writer stamps UTC, an offset-less value really is UTC wall-clock — so we
+  /// re-interpret it as UTC and store one canonical form.
+  static String? _normalizeStartedAt(Object? raw) {
+    if (raw == null) return null;
+    if (raw is DateTime) return raw.toUtc().toIso8601String();
+    final text = raw.toString();
+    if (text.isEmpty) return text;
+    final parsed = DateTime.tryParse(text);
+    if (parsed == null) return text;
+    if (parsed.isUtc) return parsed.toIso8601String();
+    return DateTime.utc(
+      parsed.year,
+      parsed.month,
+      parsed.day,
+      parsed.hour,
+      parsed.minute,
+      parsed.second,
+      parsed.millisecond,
+      parsed.microsecond,
+    ).toIso8601String();
+  }
+
   /// Parses "mm:ss", "hh:mm:ss" or a plain number of seconds into seconds.
   /// Returns null when the value is empty/unparseable/non-positive.
   static int? parseDurationToSeconds(Object? value) {
@@ -149,9 +188,24 @@ class LiveStation {
   /// Seconds elapsed since [startedAt] (0 when missing/invalid/future).
   static double getElapsedSeconds(String? startedAt) {
     if (startedAt == null || startedAt.isEmpty) return 0;
-    final start = DateTime.tryParse(startedAt);
-    if (start == null) return 0;
-    final elapsed = DateTime.now().difference(start).inMilliseconds / 1000.0;
+    final parsed = DateTime.tryParse(startedAt);
+    if (parsed == null) return 0;
+    // Rows are already normalized to UTC in [fromJson], but guard anyway: an
+    // offset-less timestamp here is UTC wall-clock, never the device's local
+    // zone. Mis-reading it as local is what produced the huge false "elapsed".
+    final start = parsed.isUtc
+        ? parsed
+        : DateTime.utc(
+            parsed.year,
+            parsed.month,
+            parsed.day,
+            parsed.hour,
+            parsed.minute,
+            parsed.second,
+            parsed.millisecond,
+            parsed.microsecond,
+          );
+    final elapsed = DateTime.now().toUtc().difference(start).inMilliseconds / 1000.0;
     return elapsed > 0 ? elapsed : 0;
   }
 

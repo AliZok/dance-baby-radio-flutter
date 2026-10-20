@@ -18,6 +18,10 @@ class AppHeader extends StatefulWidget {
   final int dismissToken;
   /// When false, header slides up off-screen (immersive chrome).
   final bool visible;
+  /// Nuxt `onMobilePageClick` treats a tap anywhere in `.playing-status` (the
+  /// brand / radio tape / LIVE toggle) as "inside the player chrome", so it
+  /// slides the chrome back in instead of toggling it off.
+  final VoidCallback? onChromeTap;
 
   const AppHeader({
     super.key,
@@ -27,6 +31,7 @@ class AppHeader extends StatefulWidget {
     this.showPlayingIcon = true,
     this.dismissToken = 0,
     this.visible = true,
+    this.onChromeTap,
   });
 
   @override
@@ -78,6 +83,7 @@ class _AppHeaderState extends State<AppHeader> {
   void _showMenuOverlay() {
     _removeMenuOverlay();
     final overlay = Overlay.of(context);
+    final loggedIn = widget.authService.isLoggedIn;
     _menuEntry = OverlayEntry(
       builder: (ctx) {
         final size = MediaQuery.sizeOf(ctx);
@@ -126,49 +132,71 @@ class _AppHeaderState extends State<AppHeader> {
                       mainAxisSize: MainAxisSize.min,
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(14, 6, 14, 10),
-                          child: Text(
-                            widget.authService.currentUser?.email ?? '',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              color: AppColors.brandSoft.withOpacity(0.85),
-                              fontSize: 12,
-                            ),
-                          ),
-                        ),
-                        Divider(height: 1, color: AppColors.primary.withOpacity(0.12)),
-                        _menuItem('Playlists', () async {
-                          _closeMenu();
-                          await Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => PlaylistsScreen(
-                                authService: widget.authService,
-                                playlistService: widget.playlistService,
+                        // Nuxt HeaderMain dropdown order: email, Playlists,
+                        // Login / Log out. Email + Playlists only when signed
+                        // in — the ☰ itself is always there (see below).
+                        if (loggedIn) ...[
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(14, 6, 14, 10),
+                            child: Text(
+                              widget.authService.currentUser?.email ?? '',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: AppColors.brandSoft.withOpacity(0.85),
+                                fontSize: 12,
                               ),
                             ),
-                          );
-                        }),
-                        _menuItem('Log out', () async {
-                          _closeMenu();
-                          widget.audioService.clearPlaylistModeOnLogout();
-                          await widget.authService.signOut();
-                          if (!mounted) return;
-                          AppToast.info(
-                            context,
-                            'You have been signed out.',
-                            title: 'Account',
-                          );
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) =>
-                                  LoginScreen(authService: widget.authService),
-                            ),
-                          );
-                        }, danger: true),
+                          ),
+                          Divider(
+                            height: 1,
+                            color: AppColors.primary.withOpacity(0.12),
+                          ),
+                          _menuItem('Playlists', () async {
+                            _closeMenu();
+                            await Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => PlaylistsScreen(
+                                  authService: widget.authService,
+                                  audioService: widget.audioService,
+                                  playlistService: widget.playlistService,
+                                ),
+                              ),
+                            );
+                          }),
+                        ],
+                        if (!loggedIn)
+                          _menuItem('Login', () {
+                            _closeMenu();
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => LoginScreen(
+                                  authService: widget.authService,
+                                  audioService: widget.audioService,
+                                ),
+                              ),
+                            );
+                          }),
+                        if (loggedIn)
+                          _menuItem('Log out', () async {
+                            _closeMenu();
+                            widget.audioService.clearPlaylistModeOnLogout();
+                            await widget.authService.signOut();
+                            if (!mounted) return;
+                            // Nuxt `handleLogout()` shows no toast — the login
+                            // page appearing is the whole feedback.
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => LoginScreen(
+                                  authService: widget.authService,
+                                  audioService: widget.audioService,
+                                ),
+                              ),
+                            );
+                          }, danger: true),
                       ],
                     ),
                   ),
@@ -200,7 +228,7 @@ class _AppHeaderState extends State<AppHeader> {
   }
 
   Widget _buildBrand(bool isPlaying) {
-    return Row(
+    final brand = Row(
       children: [
         Flexible(
           child: Text(
@@ -241,8 +269,19 @@ class _AppHeaderState extends State<AppHeader> {
         // Nuxt: the LIVE toggle sits beside the playing radio icon and switches
         // the shared live station on/off. Always available on the player page.
         const SizedBox(width: 8),
-        _LiveToggleButton(audioService: widget.audioService),
+        _LiveToggleButton(
+          audioService: widget.audioService,
+          onChromeTap: widget.onChromeTap,
+        ),
       ],
+    );
+
+    // The title / radio-tape part of `.playing-status` has no control of its
+    // own, so a tap there only reveals the sliding chrome.
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onTap: widget.onChromeTap,
+      child: brand,
     );
   }
 
@@ -252,43 +291,21 @@ class _AppHeaderState extends State<AppHeader> {
   );
 
   Widget _buildAccountButton(AuthService auth) {
-    if (auth.isLoggedIn) {
-      return CompositedTransformTarget(
-        link: _menuLink,
-        child: GestureDetector(
-          onTap: _toggleMenu,
-          child: Container(
-            width: 44,
-            height: 44,
-            alignment: Alignment.center,
-            decoration: _chromeButtonDecoration,
-            child: const Text(
-              '☰',
-              style: TextStyle(color: AppColors.brand, fontSize: 18),
-            ),
+    // Nuxt HeaderMain always renders the ☰ trigger (signed in or not) — the
+    // dropdown itself decides between Login and Playlists / Log out.
+    return CompositedTransformTarget(
+      link: _menuLink,
+      child: GestureDetector(
+        onTap: _toggleMenu,
+        child: Container(
+          width: 44,
+          height: 44,
+          alignment: Alignment.center,
+          decoration: _chromeButtonDecoration,
+          child: const Text(
+            '☰',
+            style: TextStyle(color: AppColors.brand, fontSize: 18),
           ),
-        ),
-      );
-    }
-
-    return GestureDetector(
-      onTap: () {
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) => LoginScreen(authService: widget.authService),
-          ),
-        );
-      },
-      child: Container(
-        width: 44,
-        height: 44,
-        alignment: Alignment.center,
-        decoration: _chromeButtonDecoration,
-        child: Icon(
-          Icons.login_rounded,
-          color: AppColors.brand,
-          size: 22,
         ),
       ),
     );
@@ -338,24 +355,27 @@ class _AppHeaderState extends State<AppHeader> {
 /// Switches the shared live radio station on and back to shuffle.
 class _LiveToggleButton extends StatefulWidget {
   final AudioService audioService;
+  final VoidCallback? onChromeTap;
 
-  const _LiveToggleButton({required this.audioService});
+  const _LiveToggleButton({required this.audioService, this.onChromeTap});
 
   @override
   State<_LiveToggleButton> createState() => _LiveToggleButtonState();
 }
 
 class _LiveToggleButtonState extends State<_LiveToggleButton> {
-  void _onTap() async {
-    if (widget.audioService.isLiveBusy) return;
-    final turningLive = !widget.audioService.isLiveMode;
-    await widget.audioService.toggleLiveMode();
-    if (!mounted) return;
-    AppToast.info(
-      context,
-      turningLive ? 'Radio Live' : 'You can change tracks.',
-      title: turningLive ? 'Live radio' : 'Random radio',
-    );
+  void _onTap() {
+    // Nuxt `toggleLiveMode()`: only flips the *desired* mode and is ignored
+    // while a switch is already running. The toast comes from the service when
+    // the mode actually changes (a request made during the Let's GO gate is
+    // deferred, so raising it here would be wrong).
+    widget.onChromeTap?.call();
+    if (widget.audioService.modeBusy) return;
+    if (widget.audioService.wantLive) {
+      widget.audioService.requestRandom();
+    } else {
+      widget.audioService.requestLive();
+    }
   }
 
   @override
@@ -363,8 +383,10 @@ class _LiveToggleButtonState extends State<_LiveToggleButton> {
     return ListenableBuilder(
       listenable: widget.audioService,
       builder: (context, _) {
-        final wantLive = widget.audioService.isLiveMode;
-        final disabled = widget.audioService.isLiveBusy;
+        // Nuxt labels the button with `wantLive` (the request), not the mode
+        // that is currently on air, so a pending switch is visible at once.
+        final wantLive = widget.audioService.wantLive;
+        final disabled = widget.audioService.modeBusy;
 
         // Frontend colors: idle #90999d, active #ff8da3.
         final color = wantLive

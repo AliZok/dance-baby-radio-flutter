@@ -1,14 +1,20 @@
 import 'package:flutter/material.dart';
+import 'dart:async';
+import '../services/audio_service.dart';
 import '../services/auth_service.dart';
 import '../theme/app_colors.dart';
 import '../widgets/auth_widgets.dart';
-import '../widgets/app_toast.dart';
 import 'register_screen.dart';
 
 class LoginScreen extends StatefulWidget {
   final AuthService authService;
+  final AudioService audioService;
 
-  const LoginScreen({super.key, required this.authService});
+  const LoginScreen({
+    super.key,
+    required this.authService,
+    required this.audioService,
+  });
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -64,15 +70,20 @@ class _LoginScreenState extends State<LoginScreen> {
 
     if (!mounted) return;
 
+    // Nuxt `login.vue` handleLogin: nothing is toasted on success. When the
+    // radio is silent, the sign-in itself releases the "Let's GO" gate
+    // (`skipLetsGo` + `autoPlayAfterLogin`) and playback starts on the home page.
     if (result.success) {
-      AppToast.success(context, 'Welcome back.', title: 'Signed in');
-      Navigator.of(context).popUntil((route) => route.isFirst);
-    } else {
-      setState(() {});
-      if (result.error != null && result.error!.isNotEmpty) {
-        AppToast.error(context, result.error!, title: 'Sign in');
+      if (!widget.audioService.isPlaying) {
+        unawaited(widget.audioService.skipIntroGateAndAutoplay());
       }
+      Navigator.of(context).popUntil((route) => route.isFirst);
+      return;
     }
+
+    // Nuxt surfaces the failure inline through `authError` only — the message
+    // is already rendered below the password field.
+    setState(() {});
   }
 
   @override
@@ -124,7 +135,10 @@ class _LoginScreenState extends State<LoginScreen> {
                   onPressed: () {
                     Navigator.of(context).pushReplacement(
                       MaterialPageRoute(
-                        builder: (_) => RegisterScreen(authService: widget.authService),
+                        builder: (_) => RegisterScreen(
+                          authService: widget.authService,
+                          audioService: widget.audioService,
+                        ),
                       ),
                     );
                   },

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../services/audio_service.dart';
 import '../services/auth_service.dart';
 import '../theme/app_colors.dart';
 import '../widgets/app_toast.dart';
@@ -7,8 +8,13 @@ import 'login_screen.dart';
 
 class RegisterScreen extends StatefulWidget {
   final AuthService authService;
+  final AudioService audioService;
 
-  const RegisterScreen({super.key, required this.authService});
+  const RegisterScreen({
+    super.key,
+    required this.authService,
+    required this.audioService,
+  });
 
   @override
   State<RegisterScreen> createState() => _RegisterScreenState();
@@ -86,18 +92,24 @@ class _RegisterScreenState extends State<RegisterScreen> {
       return;
     }
 
+    // Nuxt `register.vue`: the confirmation hint stays on screen for 10 s and
+    // the redirect to the login page happens right after it disappears.
     AppToast.info(
       context,
       'Please check your inbox and confirm your signup. The confirmation email is sent by Supabase.',
       title: 'Check your email',
+      duration: const Duration(seconds: 10),
     );
 
-    await Future.delayed(const Duration(seconds: 2));
+    await Future.delayed(const Duration(seconds: 10));
     if (!mounted) return;
 
     Navigator.of(context).pushReplacement(
       MaterialPageRoute(
-        builder: (_) => LoginScreen(authService: widget.authService),
+        builder: (_) => LoginScreen(
+          authService: widget.authService,
+          audioService: widget.audioService,
+        ),
       ),
     );
   }
@@ -158,7 +170,10 @@ class _RegisterScreenState extends State<RegisterScreen> {
                   onPressed: () {
                     Navigator.of(context).pushReplacement(
                       MaterialPageRoute(
-                        builder: (_) => LoginScreen(authService: widget.authService),
+                        builder: (_) => LoginScreen(
+                          authService: widget.authService,
+                          audioService: widget.audioService,
+                        ),
                       ),
                     );
                   },

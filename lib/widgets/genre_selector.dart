@@ -150,12 +150,16 @@ class _GenreMenu extends StatelessWidget {
                 onTap: () {
                   final turningOn = !genre.active;
                   audioService.toggleGenre(genre);
+                  // Nuxt activeGenre() copy — the genre name is highlighted.
+                  final name =
+                      genre.text.isNotEmpty ? genre.text : genre.genre;
                   AppToast.info(
                     context,
                     turningOn
-                        ? '“${genre.text}” filter on.'
-                        : '“${genre.text}” filter off.',
+                        ? "You'll also hear $name."
+                        : "You won't hear $name in upcoming tracks.",
                     title: 'Genre',
+                    highlight: name,
                   );
                 },
                 child: Padding(

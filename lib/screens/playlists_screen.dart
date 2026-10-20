@@ -4,6 +4,7 @@ import 'package:just_audio/just_audio.dart';
 import '../models/music.dart';
 import '../models/playlist.dart';
 import '../services/auth_service.dart';
+import '../services/audio_service.dart';
 import '../services/playlist_service.dart';
 import '../theme/app_colors.dart';
 import '../widgets/app_toast.dart';
@@ -11,11 +12,13 @@ import 'login_screen.dart';
 
 class PlaylistsScreen extends StatefulWidget {
   final AuthService authService;
+  final AudioService audioService;
   final PlaylistService playlistService;
 
   const PlaylistsScreen({
     super.key,
     required this.authService,
+    required this.audioService,
     required this.playlistService,
   });
 
@@ -140,6 +143,10 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
       await _localPlayer.pause();
       return;
     }
+
+    // Nuxt `playTrack()` → `requestPauseMainPlayer()`: the background radio has
+    // to go quiet or the preview plays on top of it (two players, one session).
+    await widget.audioService.pauseAudio();
 
     if (_activeTrack?.id != track.id) {
       setState(() {
@@ -461,7 +468,10 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
                 await Navigator.push(
                   context,
                   MaterialPageRoute(
-                    builder: (_) => LoginScreen(authService: widget.authService),
+                    builder: (_) => LoginScreen(
+                      authService: widget.authService,
+                      audioService: widget.audioService,
+                    ),
                   ),
                 );
                 if (mounted && widget.authService.isLoggedIn) {
