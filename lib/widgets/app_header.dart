@@ -238,6 +238,10 @@ class _AppHeaderState extends State<AppHeader> {
             ),
           ),
         ],
+        // Nuxt: the LIVE toggle sits beside the playing radio icon and switches
+        // the shared live station on/off. Always available on the player page.
+        const SizedBox(width: 8),
+        _LiveToggleButton(audioService: widget.audioService),
       ],
     );
   }
@@ -321,6 +325,156 @@ class _AppHeaderState extends State<AppHeader> {
                     child: _buildAccountButton(auth),
                   ),
                 ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Header "GO LIVE" / "LIVE" toggle (Nuxt HeaderMain `.live-toggle`).
+/// Switches the shared live radio station on and back to shuffle.
+class _LiveToggleButton extends StatefulWidget {
+  final AudioService audioService;
+
+  const _LiveToggleButton({required this.audioService});
+
+  @override
+  State<_LiveToggleButton> createState() => _LiveToggleButtonState();
+}
+
+class _LiveToggleButtonState extends State<_LiveToggleButton> {
+  void _onTap() async {
+    if (widget.audioService.isLiveBusy) return;
+    final turningLive = !widget.audioService.isLiveMode;
+    await widget.audioService.toggleLiveMode();
+    if (!mounted) return;
+    AppToast.info(
+      context,
+      turningLive ? 'Radio Live' : 'You can change tracks.',
+      title: turningLive ? 'Live radio' : 'Random radio',
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: widget.audioService,
+      builder: (context, _) {
+        final wantLive = widget.audioService.isLiveMode;
+        final disabled = widget.audioService.isLiveBusy;
+
+        // Frontend colors: idle #90999d, active #ff8da3.
+        final color = wantLive
+            ? const Color(0xFFFF8DA3)
+            : const Color(0xFF90999D).withOpacity(disabled ? 0.5 : 1.0);
+
+        return Opacity(
+          opacity: disabled ? 0.5 : 1.0,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: disabled ? null : _onTap,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _LivePulseDot(active: wantLive),
+                  const SizedBox(width: 5),
+                  Text(
+                    wantLive ? 'LIVE' : 'GO LIVE',
+                    style: TextStyle(
+                      color: color,
+                      fontSize: 9,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 1.4,
+                      height: 1,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// The small status dot — steady gray when idle, pulsing red when live
+/// (Nuxt `.live-dot` + `live-pulse` keyframes).
+class _LivePulseDot extends StatefulWidget {
+  final bool active;
+  const _LivePulseDot({required this.active});
+
+  @override
+  State<_LivePulseDot> createState() => _LivePulseDotState();
+}
+
+class _LivePulseDotState extends State<_LivePulseDot>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1200),
+    );
+    _syncAnimation();
+  }
+
+  @override
+  void didUpdateWidget(covariant _LivePulseDot oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.active != widget.active) _syncAnimation();
+  }
+
+  void _syncAnimation() {
+    if (widget.active) {
+      _controller.repeat(reverse: true);
+    } else {
+      _controller.stop();
+      _controller.value = 0;
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!widget.active) {
+      return Container(
+        width: 5,
+        height: 5,
+        decoration: const BoxDecoration(
+          color: Color(0xFF6D7579),
+          shape: BoxShape.circle,
+        ),
+      );
+    }
+
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, child) {
+        final t = _controller.value;
+        return Container(
+          width: 5,
+          height: 5,
+          decoration: BoxDecoration(
+            color: const Color(0xFFFF4D6D),
+            shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                color: const Color(0xFFFF4D6D).withOpacity(0.5 + 0.4 * t),
+                blurRadius: 4 + 3 * t,
               ),
             ],
           ),

@@ -8,7 +8,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/music.dart';
 import '../models/genre.dart';
 import '../models/playlist.dart';
+import '../models/live_station.dart';
 import 'supabase_service.dart';
+import 'live_service.dart';
 
 class AudioService extends ChangeNotifier {
   final SupabaseService _supabaseService = SupabaseService();
@@ -86,6 +88,19 @@ class AudioService extends ChangeNotifier {
   Playlist? _activePlaybackPlaylist;
   List<Music> _activePlaylistTracks = [];
 
+  // Live radio mode (matches Nuxt useLiveRadio + PlayerMain live branch).
+  // Plays the shared `live-music` station on the primary player and keeps every
+  // client (web + this app) in sync by seeking to the station's elapsed time.
+  final LiveService _liveService = LiveService();
+  bool _isLiveMode = false;
+  bool _liveBusy = false;
+  bool _liveAdvanceBusy = false;
+  String _lastAppliedLiveIdentity = '';
+  String _liveLoadedAudio = ''; // audio url currently loaded on primary
+  LiveStation? _liveStation;
+  VoidCallback? _liveSubscriptionCancel;
+  Timer? _liveResyncTimer;
+
   // Subscriptions to clean up
   StreamSubscription? _primaryPositionSub;
   StreamSubscription? _primaryDurationSub;
@@ -132,6 +147,10 @@ class AudioService extends ChangeNotifier {
 
   Playlist? get activePlaybackPlaylist => _activePlaybackPlaylist;
   bool get isPlaylistMode => _activePlaybackPlaylist != null;
+
+  // Live mode getters
+  bool get isLiveMode => _isLiveMode;
+  bool get isLiveBusy => _liveBusy;
 
   AudioService() {
     // Dual ExoPlayers share one Android audio session. Interruptions from the
@@ -325,6 +344,9 @@ class AudioService extends ChangeNotifier {
 
   /// Enter playlist-as-source mode (or exit if same playlist is toggled).
   Future<void> playFromPlaylist(Playlist playlist, List<Music> tracks) async {
+    // Leaving live mode first so the playlist owns the players again.
+    if (_isLiveMode) await exitLiveMode();
+
     final playable = tracks.where((t) => t.audio.isNotEmpty).toList();
     if (playable.isEmpty) {
       throw Exception('Empty playlist');
@@ -470,7 +492,8 @@ class AudioService extends ChangeNotifier {
   /// Keeps user preference in [_volume] so the slider / next track stay correct.
   void _applyFadeOutVolume(Duration position) {
     var factor = 1.0;
-    if (!_isTransitioning && _duration > Duration.zero) {
+    // No end-of-track fade in live mode — the station advances on its own.
+    if (!_isTransitioning && !_isLiveMode && _duration > Duration.zero) {
       final fadeMs = min(
         _fadeOutDuration.inMilliseconds,
         _duration.inMilliseconds,
@@ -836,7 +859,7 @@ class AudioService extends ChangeNotifier {
         'Track failed to load/play: ${failed.title} (ID: ${failed.id}) '
         'side=${isOriginSide ? 'origin' : 'support'}',
       );
-      if (!isPlaylistMode) {
+      if (!isPlaylistMode && !_isLiveMode) {
         try {
           await _supabaseService.updateMusicById(
             failed.id,
@@ -909,7 +932,7 @@ class AudioService extends ChangeNotifier {
     // Reset stuck clock so the replacement track gets a fresh 11s window.
     _disarmStuckWatch();
     try {
-      if (failed != null && !isPlaylistMode) {
+      if (failed != null && !isPlaylistMode && !_isLiveMode) {
         try {
           await _supabaseService.updateMusicById(
             failed.id,
@@ -1030,6 +1053,13 @@ class AudioService extends ChangeNotifier {
   }
 
   Future<void> resumeAudio() async {
+    // In live mode "resume" means get back onto the shared station at the
+    // correct elapsed position, not resume the local shuffle buffer.
+    if (_isLiveMode) {
+      await _playLiveStation();
+      return;
+    }
+
     _resumeAfterInterruption = false;
     // Intro already waited for a hot buffer — don't flash the
     // cover spinner on the first play().
@@ -1067,6 +1097,13 @@ class AudioService extends ChangeNotifier {
   /// tap. Automatic `ended`/`completed` never queues, so a double-fire cannot
   /// skip two tracks in a row.
   Future<void> playNextMusic({bool fromUser = true}) async {
+    // Live: "next" moves the shared station forward instead of flipping the
+    // local dual-player shuffle buffers.
+    if (_isLiveMode) {
+      await _advanceLiveStation(force: true);
+      return;
+    }
+
     if (_isTransitioning) {
       if (fromUser) _queuedNext = true;
       return;
@@ -1198,6 +1235,11 @@ class AudioService extends ChangeNotifier {
   /// Cold restart (pull-down): same path as opening the app — splash, fresh
   /// dual buffers from the API, then autoplay. Genre prefs are kept.
   Future<void> refreshRadio() async {
+    // In live mode a pull-to-refresh just re-syncs the shared station.
+    if (_isLiveMode) {
+      await _playLiveStation();
+      return;
+    }
     if (_softRefreshInFlight) return;
     _softRefreshInFlight = true;
 
@@ -1250,6 +1292,10 @@ class AudioService extends ChangeNotifier {
   }
 
   void seek(Duration position) {
+    // Live playback follows the shared station clock — user scrubbing is
+    // disabled (matches Nuxt onSliderInput returning early in live mode).
+    if (_isLiveMode) return;
+
     // Only the active player — seeking the inactive (often shorter) buffer to
     // the same time can push it to `ended`/`completed` and skip the track.
     var target = position.isNegative ? Duration.zero : position;
@@ -1302,6 +1348,9 @@ class AudioService extends ChangeNotifier {
   }
 
   Future<void> toggleGenre(Genre genre) async {
+    // Genre filters don't apply in live mode (station draws from a fixed pool).
+    if (_isLiveMode) return;
+
     // Match the frontend exactly: every genre can independently be enabled or
     // disabled, including turning all filters off (which means "all genres").
     final turningOff = genre.active;
@@ -1321,8 +1370,276 @@ class AudioService extends ChangeNotifier {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Live radio mode — shared `live-music` station (web + this app stay in sync)
+  // ---------------------------------------------------------------------------
+
+  /// Header LIVE toggle: switch between the shared live station and shuffle.
+  Future<void> toggleLiveMode() async {
+    if (_liveBusy) return;
+    if (_isLiveMode) {
+      await exitLiveMode();
+    } else {
+      await enterLiveMode();
+    }
+  }
+
+  Future<void> enterLiveMode() async {
+    if (_isLiveMode) return;
+    _liveBusy = true;
+    notifyListeners();
+    try {
+      _stopLiveSync();
+
+      // Drop shuffle / playlist ownership of the players.
+      _activePlaybackPlaylist = null;
+      _activePlaylistTracks = [];
+      _isRepeat = false;
+      await _playerPrimary.setLoopMode(LoopMode.off);
+      await _playerSupport.setLoopMode(LoopMode.off);
+      try {
+        await _playerSupport.stop();
+      } catch (_) {}
+
+      _originAudio = false;
+      _playbackHistory.clear();
+      _consecutiveLoadFailures = 0;
+      _isLiveMode = true;
+      _hasStarted = true;
+      _expectingPlayback = true;
+      _liveLoadedAudio = '';
+      _lastAppliedLiveIdentity = '';
+      _liveStation = null;
+      _liveAdvanceBusy = false;
+
+      _disarmStuckWatch();
+      _markLoading();
+      notifyListeners();
+
+      await _ensureAudioSessionActive();
+      await _playLiveStation();
+
+      // Keep in sync with the station: realtime + polling (same as the web app),
+      // plus a local resync tick to correct drift and advance on expiry.
+      _liveSubscriptionCancel = _liveService.subscribeLiveStation(
+        (row) => unawaited(_onLiveStationChange(row)),
+      );
+      _startLiveResyncTimer();
+    } finally {
+      _liveBusy = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> exitLiveMode() async {
+    if (!_isLiveMode) return;
+    _isLiveMode = false;
+    _liveBusy = true;
+    notifyListeners();
+    try {
+      _stopLiveSync();
+      _liveStation = null;
+      _liveLoadedAudio = '';
+      _lastAppliedLiveIdentity = '';
+      _originAudio = false;
+
+      // Fresh random dual buffers, then autoplay — like returning to shuffle.
+      await _loadInitialTracks();
+      _hasStarted = true;
+      if (_isAudioReady) {
+        await resumeAudio();
+      }
+    } finally {
+      _liveBusy = false;
+      notifyListeners();
+    }
+  }
+
+  /// Ensures a live track is on air and plays it on the primary player.
+  Future<void> _playLiveStation() async {
+    _expectingPlayback = true;
+    _markLoading();
+    notifyListeners();
+    try {
+      final row = await _liveService.ensureLiveStation(
+        excludeTrack: _currentOriginTrack,
+      );
+      if (row == null || !row.hasAudio) {
+        _markNotLoading();
+        return;
+      }
+      await _applyLiveRow(row, play: true);
+    } catch (e) {
+      print('playLiveStation failed: $e');
+      _markNotLoading();
+      notifyListeners();
+    }
+  }
+
+  /// Loads [row] on the primary player (only if the audio actually changed) and
+  /// seeks to the elapsed station time so every listener is phase-aligned.
+  Future<void> _applyLiveRow(LiveStation row, {bool play = true}) async {
+    if (!row.hasAudio) return;
+
+    _originAudio = false;
+    _currentOriginTrack = row.toMusic();
+    _liveStation = row;
+    _lastAppliedLiveIdentity = row.identity;
+
+    if (_liveLoadedAudio != row.audio) {
+      try {
+        await _playerPrimary.setUrl(row.audio).timeout(_setUrlTimeout);
+        _liveLoadedAudio = row.audio;
+      } catch (e) {
+        print('Live setUrl failed — advancing station: $e');
+        await _advanceLiveStation(force: true);
+        return;
+      }
+    }
+
+    final elapsed = LiveStation.getElapsedSeconds(row.startedAt);
+    final mediaDuration = _playerPrimary.duration;
+    final mediaSeconds =
+        (mediaDuration?.inMilliseconds ?? 0) / 1000.0;
+
+    // Already at/past the end of the buffered media → the station moved on.
+    if (mediaSeconds > 0 &&
+        elapsed >= mediaSeconds - 0.35 &&
+        (LiveStation.parseDurationToSeconds(row.duration) ?? 0) <= 0) {
+      await _advanceLiveStation(force: true);
+      return;
+    }
+
+    final target = Duration(milliseconds: (elapsed * 1000).round());
+    if ((_playerPrimary.position - target).abs() >
+        const Duration(milliseconds: 350)) {
+      try {
+        await _playerPrimary.seek(target);
+      } catch (_) {}
+    }
+    _currentTime = _playerPrimary.position;
+    if (mediaDuration != null && mediaDuration > Duration.zero) {
+      _duration = mediaDuration;
+    }
+    notifyListeners();
+
+    if (play) {
+      try {
+        await _playActiveAndConfirm();
+        _consecutiveLoadFailures = 0;
+      } catch (e) {
+        print('Live play confirm failed — advancing station: $e');
+        await _advanceLiveStation(force: true);
+      }
+    }
+  }
+
+  /// Reacts to a station update from realtime / polling.
+  Future<void> _onLiveStationChange(LiveStation row) async {
+    if (!_isLiveMode || !row.hasAudio) return;
+    if (_liveAdvanceBusy) return;
+
+    final identity = row.identity;
+    if (identity.isNotEmpty && identity == _lastAppliedLiveIdentity) {
+      // Same track — only correct drift if we've fallen behind the station.
+      if (!_expectingPlayback) return;
+      final elapsed = LiveStation.getElapsedSeconds(row.startedAt);
+      final drift =
+          (_playerPrimary.position.inMilliseconds / 1000.0 - elapsed).abs();
+      if (drift <= 2.5) return;
+      await _playerPrimary
+          .seek(Duration(milliseconds: (elapsed * 1000).round()));
+      return;
+    }
+
+    _liveStation = row;
+    if (LiveStation.isTrackExpired(row)) {
+      await _advanceLiveStation(force: true);
+      return;
+    }
+    await _applyLiveRow(row, play: _expectingPlayback);
+  }
+
+  /// Claims/publishes the next track on the shared station and plays it.
+  Future<void> _advanceLiveStation({bool force = false}) async {
+    if (!_isLiveMode) return;
+    if (_liveAdvanceBusy) return;
+
+    _liveAdvanceBusy = true;
+    _expectingPlayback = true;
+    _markLoading();
+    notifyListeners();
+    try {
+      final next = await _liveService.advanceLiveStation(
+        currentRow: _liveStation,
+        excludeTrack: _currentOriginTrack,
+      );
+      if (next != null && next.hasAudio) {
+        _lastAppliedLiveIdentity = '';
+        await _applyLiveRow(next, play: true);
+      } else {
+        _markNotLoading();
+      }
+    } catch (e) {
+      print('advanceLiveStation failed: $e');
+      _markNotLoading();
+    } finally {
+      _liveAdvanceBusy = false;
+      notifyListeners();
+    }
+  }
+
+  /// Local clock check every 2s: advance when the on-air track expires and
+  /// nudge the player back onto the station position if it drifted.
+  void _startLiveResyncTimer() {
+    _liveResyncTimer?.cancel();
+    _liveResyncTimer = Timer.periodic(
+      const Duration(seconds: 2),
+      (_) => _liveResyncTick(),
+    );
+  }
+
+  void _liveResyncTick() {
+    if (!_isLiveMode) return;
+    final row = _liveStation;
+    if (row == null) return;
+
+    if (LiveStation.isTrackExpired(row)) {
+      unawaited(_advanceLiveStation(force: true));
+      return;
+    }
+
+    if (!_expectingPlayback) return; // user-paused — don't fight them
+
+    final elapsed = LiveStation.getElapsedSeconds(row.startedAt);
+    final mediaSeconds = (_playerPrimary.duration?.inMilliseconds ?? 0) / 1000.0;
+    if (mediaSeconds > 0 && elapsed >= mediaSeconds - 0.35) {
+      unawaited(_advanceLiveStation(force: true));
+      return;
+    }
+
+    final drift =
+        (_playerPrimary.position.inMilliseconds / 1000.0 - elapsed).abs();
+    if (drift > 2.5) {
+      unawaited(
+        _playerPrimary.seek(Duration(milliseconds: (elapsed * 1000).round())),
+      );
+    }
+    if (!_playerPrimary.playing) {
+      unawaited(_playerPrimary.play().catchError((Object _) {}));
+    }
+  }
+
+  void _stopLiveSync() {
+    _liveSubscriptionCancel?.call();
+    _liveSubscriptionCancel = null;
+    _liveResyncTimer?.cancel();
+    _liveResyncTimer = null;
+  }
+
   @override
   void dispose() {
+    _stopLiveSync();
     _disarmStuckWatch();
     _interruptionSub?.cancel();
     _becomingNoisySub?.cancel();

@@ -732,8 +732,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   ),
                 ),
 
-                // 6. Genre — hidden in playlist mode; slides in from left edge
-                if (!widget.audioService.isPlaylistMode)
+                // 6. Genre — hidden in playlist and live mode (station uses a
+                // fixed genre pool); slides in from left edge
+                if (!widget.audioService.isPlaylistMode &&
+                    !widget.audioService.isLiveMode)
                   AnimatedPositioned(
                     duration: _chromeDuration,
                     curve: _chromeCurve,
