@@ -1000,16 +1000,11 @@ class AudioService extends ChangeNotifier {
         'Track failed to load/play: ${failed.title} (ID: ${failed.id}) '
         'side=${isOriginSide ? 'origin' : 'support'}',
       );
-      if (!isPlaylistMode && !_isLiveMode) {
-        try {
-          await _supabaseService.updateMusicById(
-            failed.id,
-            {'is_active': false},
-          );
-        } catch (e) {
-          print('Failed to mark track inactive: $e');
-        }
-      }
+      // Deactivation DISABLED on purpose. A preload / load timeout used to write
+      // is_active:false permanently into the shared `musics` table — killing a
+      // perfectly good song for *every* listener, with no code path that ever
+      // set it back to true. Now we simply skip the bad buffer locally and fetch
+      // a replacement below; the row is never deactivated because of a glitch.
     }
 
     final exclude = isOriginSide ? _currentSupportTrack : _currentOriginTrack;
@@ -1078,23 +1073,14 @@ class AudioService extends ChangeNotifier {
     _consecutiveLoadFailures++;
     // Reset stuck clock so the replacement track gets a fresh 11s window.
     _disarmStuckWatch();
-    try {
-      if (failed != null && !isPlaylistMode && !_isLiveMode) {
-        try {
-          await _supabaseService.updateMusicById(
-            failed.id,
-            {'is_active': false},
-          );
-        } catch (e) {
-          print('Failed to mark track inactive: $e');
-        }
-      }
-    } finally {
-      // Release before playNextMusic so another dead URL can retry (capped by
-      // _consecutiveLoadFailures). Holding the flag across that call swallowed
-      // the follow-up skip and left playback paused on the replacement.
-      _handlingPlaybackError = false;
-    }
+
+    // Deactivation DISABLED on purpose (see _replaceFailedSide): a transient
+    // failure no longer writes is_active:false to the shared `musics` table.
+    // Release the error flag before playNextMusic so another dead URL can still
+    // retry (capped by _consecutiveLoadFailures). Holding the flag across that
+    // call swallowed the follow-up skip and left playback paused on the
+    // replacement.
+    _handlingPlaybackError = false;
 
     // Flip + play the other buffer (same idea as Nuxt flipping originAudio
     // and re-entering playBetter). playNextMusic also refills the dead side.
