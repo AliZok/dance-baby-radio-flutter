@@ -6,7 +6,6 @@ import '../services/playlist_service.dart';
 import '../theme/app_colors.dart';
 import '../screens/login_screen.dart';
 import '../screens/playlists_screen.dart';
-import 'app_toast.dart';
 
 /// Brand header + account hamburger (Nuxt HeaderMain).
 /// Account dropdown uses [Overlay] so it never falls under the player card.

@@ -70,12 +70,13 @@ class _LoginScreenState extends State<LoginScreen> {
 
     if (!mounted) return;
 
-    // Nuxt `login.vue` handleLogin: nothing is toasted on success. When the
-    // radio is silent, the sign-in itself releases the "Let's GO" gate
-    // (`skipLetsGo` + `autoPlayAfterLogin`) and playback starts on the home page.
+    // Nuxt `login.vue` handleLogin: nothing is toasted on success. When the radio
+    // is silent the sign-in starts it (`skipLetsGo` + `autoPlayAfterLogin` →
+    // `playMusic()` on the web). Native has no intro gate, so this is just
+    // "make sure something is audible" before going back to the player.
     if (result.success) {
       if (!widget.audioService.isPlaying) {
-        unawaited(widget.audioService.skipIntroGateAndAutoplay());
+        unawaited(widget.audioService.startIfSilent());
       }
       Navigator.of(context).popUntil((route) => route.isFirst);
       return;

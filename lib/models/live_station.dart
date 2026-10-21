@@ -16,9 +16,20 @@ class LiveStation {
   final String duration;
   final double? star;
 
-  /// When the DJ started this track (ISO string from the DB). Elapsed seconds
-  /// since this timestamp drive seek-to-position and expiry.
+  /// When the DJ started this track (canonical UTC ISO string from [fromJson]'s
+  /// normalization). Elapsed seconds since this timestamp drive seek-to-position
+  /// and expiry.
   final String? startedAt;
+
+  /// The **raw** `startedAt` text exactly as Supabase returned it.
+  ///
+  /// Needed for the compare-and-swap claim (`claimLiveStation` sends it back in
+  /// `.eq('startedAt', …)`): the database compares its own textual form, so a
+  /// re-formatted string can never match. Normalizing it (see [startedAt]) made
+  /// every claim miss, and a missing claim falls through to an unconditional
+  /// `publishLiveStation` — which is how one phone started overwriting the shared
+  /// station over and over.
+  final String? startedAtRaw;
 
   const LiveStation({
     required this.id,
@@ -30,6 +41,7 @@ class LiveStation {
     required this.duration,
     this.star,
     this.startedAt,
+    this.startedAtRaw,
   });
 
   bool get hasAudio => audio.isNotEmpty;
@@ -38,10 +50,13 @@ class LiveStation {
     final idRaw = json['id'];
     final id = idRaw is int ? idRaw : int.tryParse('$idRaw') ?? 0;
 
-    // Normalize to a single canonical UTC string. See [_normalizeStartedAt]:
-    // without this the live loop mistakes a fresh track for an expired one and
-    // advances forever.
-    final startedAt = _normalizeStartedAt(json['startedAt'] ?? json['started_at']);
+    final raw = json['startedAt'] ?? json['started_at'];
+    final startedAtRaw = raw == null ? null : raw.toString();
+
+    // Normalize to a single canonical UTC string for the *clock* math. See
+    // [_normalizeStartedAt]: without this the live loop mistakes a fresh track
+    // for an expired one and advances forever.
+    final startedAt = _normalizeStartedAt(raw);
 
     final starRaw = json['star'] ?? json['score'];
     double? star;
@@ -65,11 +80,24 @@ class LiveStation {
       duration: json['duration'] as String? ?? '',
       star: star,
       startedAt: startedAt,
+      startedAtRaw: startedAtRaw,
     );
   }
 
+  /// The value to compare against `live-music.startedAt` when claiming. Falls
+  /// back to the normalized form for rows we stamped ourselves (no raw value).
+  String? get startedAtForCas =>
+      (startedAtRaw != null && startedAtRaw!.isNotEmpty) ? startedAtRaw : startedAt;
+
   /// Payload written back to the `live-music` table (matches trackToLivePayload).
   /// A fresh [startedAt] is stamped when the station is claimed/published.
+  ///
+  /// `duration` is written as the raw value or an empty string — never a
+  /// `'00:00'` placeholder. Nuxt does `track?.duration || ''`, and an empty
+  /// duration makes every client (web included) use the 15-minute "unknown
+  /// length" window. A zero duration instead parses as a 0-second song, which
+  /// marks the shared station expired 1.25 s after it was claimed and sends
+  /// every listener into a claim/publish storm.
   Map<String, dynamic> toPayload({String? startedAt}) {
     return {
       'title': title,
@@ -77,7 +105,7 @@ class LiveStation {
       'cover': cover,
       'audio': audio,
       'genre': genre,
-      'duration': duration,
+      'duration': _sanitizeDuration(duration),
       'star': star,
       'startedAt': startedAt ?? DateTime.now().toUtc().toIso8601String(),
     };
@@ -113,6 +141,9 @@ class LiveStation {
 
   /// Build a station row from a randomly-picked [Music], stamping the moment it
   /// begins broadcasting (used when claiming/publishing the station).
+  ///
+  /// [Music] substitutes a `'00:00'` display default for a missing DB duration,
+  /// so the value has to be sanitized before it is broadcast to the shared row.
   factory LiveStation.fromMusic(Music music, {String? startedAt}) {
     return LiveStation(
       id: 1,
@@ -121,13 +152,22 @@ class LiveStation {
       cover: music.cover,
       audio: music.audio,
       genre: music.genre,
-      duration: music.duration,
+      duration: _sanitizeDuration(music.duration),
       star: null,
       startedAt: startedAt ?? DateTime.now().toUtc().toIso8601String(),
+      startedAtRaw: startedAt,
     );
   }
 
   // ---- Static helpers mirroring useLiveRadio.js ----
+
+  /// Keeps only a real duration in the station payload: blanks, `'0'`, `'00:00'`
+  /// and `'00:00:00'` all become `''` ("unknown length" → 15 minute window).
+  static String _sanitizeDuration(String value) {
+    if (value.trim().isEmpty) return '';
+    final seconds = parseDurationToSeconds(value);
+    return (seconds == null || seconds <= 0) ? '' : value.trim();
+  }
 
   /// Canonicalizes a `startedAt` value coming from Supabase to a single UTC ISO
   /// string.
@@ -162,7 +202,9 @@ class LiveStation {
   }
 
   /// Parses "mm:ss", "hh:mm:ss" or a plain number of seconds into seconds.
-  /// Returns null when the value is empty/unparseable/non-positive.
+  /// Returns null when the value is empty/unparseable/**non-positive** — a zero
+  /// length carries no information, so callers must fall back to the stale window
+  /// instead of treating the song as instantly over.
   static int? parseDurationToSeconds(Object? value) {
     if (value == null) return null;
     final str = value.toString().trim();
@@ -176,13 +218,15 @@ class LiveStation {
     final parts = str.split(':').map((p) => int.tryParse(p.trim())).toList();
     if (parts.isEmpty || parts.any((p) => p == null)) return null;
 
+    final int seconds;
     if (parts.length == 3) {
-      return (parts[0]! * 3600) + (parts[1]! * 60) + parts[2]!;
+      seconds = (parts[0]! * 3600) + (parts[1]! * 60) + parts[2]!;
+    } else if (parts.length == 2) {
+      seconds = (parts[0]! * 60) + parts[1]!;
+    } else {
+      seconds = parts[0]!;
     }
-    if (parts.length == 2) {
-      return (parts[0]! * 60) + parts[1]!;
-    }
-    return parts[0]! > 0 ? parts[0] : null;
+    return seconds > 0 ? seconds : null;
   }
 
   /// Seconds elapsed since [startedAt] (0 when missing/invalid/future).
@@ -219,7 +263,8 @@ class LiveStation {
     final duration = parseDurationToSeconds(row.duration);
 
     if (duration == null) {
-      // Unknown length: treat as stale after 15 minutes so a dead station recovers.
+      // Unknown (or zero) length: treat as stale after 15 minutes so a dead
+      // station recovers without letting a bogus `00:00` row expire instantly.
       return elapsed > 15 * 60;
     }
     return elapsed >= duration + graceSeconds;

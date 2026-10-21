@@ -71,6 +71,11 @@ class LiveService {
   /// Atomically takes over the station only if `startedAt` still matches
   /// [expectedStartedAt] (compare-and-swap so two claimers don't clobber each
   /// other). Returns `claimed: false` when someone else moved first.
+  ///
+  /// [expectedStartedAt] MUST be the raw text Postgres gave us
+  /// ([LiveStation.startedAtForCas]): the database compares its own `timestamptz`
+  /// rendering, so a re-formatted/normalized string never matches and every
+  /// claim silently falls through to the unconditional publish below.
   Future<({LiveStation? data, bool claimed})> claimLiveStation(
     String? expectedStartedAt,
     Music track,
@@ -138,7 +143,7 @@ class LiveService {
     final nextTrack = await pickStationTrack(excludeTrack: excludeTrack);
     if (nextTrack == null) return current;
 
-    final claimed = await claimLiveStation(current?.startedAt, nextTrack);
+    final claimed = await claimLiveStation(current?.startedAtForCas, nextTrack);
     if (claimed.claimed) return claimed.data;
 
     final latest = await fetchLiveStation();
@@ -161,7 +166,7 @@ class LiveService {
     final nextTrack = await pickStationTrack(excludeTrack: excludeTrack);
     if (nextTrack == null) return current;
 
-    final claimed = await claimLiveStation(current?.startedAt, nextTrack);
+    final claimed = await claimLiveStation(current?.startedAtForCas, nextTrack);
     if (claimed.claimed) return claimed.data;
 
     final latest = await fetchLiveStation();

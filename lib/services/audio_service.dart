@@ -50,16 +50,12 @@ class AudioService extends ChangeNotifier {
   /// Nuxt "don't sync both players on seek" fix).
   DateTime? _ignoreCompletedUntil;
   bool _hasStarted = false;
-  /// Nuxt `letsGoModal`: the LOADING → "Let's GO" gate stays up until the user
-  /// taps, so the very first playback always starts from a real user gesture.
-  bool _letsGoPending = true;
-  /// Nuxt `autoPlayAfterLogin`: signing in counts as the user gesture, so the
-  /// intro gate is skipped and the radio starts by itself once tracks are hot.
-  bool _autoPlayAfterLogin = false;
+  // NOTE: the web's Nuxt `letsGoModal` ("Let's GO" intro gate) is deliberately
+  // NOT ported. It exists only because browsers refuse to start audio without a
+  // user gesture; a native app has no such restriction, so playback starts by
+  // itself as soon as the first buffer is hot.
   /// Nuxt `desiredMode === 'live'` — what the user *asked* for, which is not
-  /// necessarily what is playing yet ([_isLiveMode] is the actual mode). While
-  /// the Let's GO gate is open the request is remembered and deferred, then
-  /// honoured the moment the gate is released (exactly like the web watcher).
+  /// necessarily what is playing yet ([_isLiveMode] is the actual mode).
   bool _wantLive = false;
   double _volume = 1.0; // 0.0 to 1.0
   /// Last volume written to the active player (may be faded below [_volume]).
@@ -127,6 +123,27 @@ class AudioService extends ChangeNotifier {
   // Last time we claimed/published a new station track — throttles back-to-back
   // advances so a burst of events can't skip through many songs at once.
   DateTime? _lastLiveAdvanceAt;
+  static const Duration _liveClaimThrottle = Duration(seconds: 6);
+
+  /// Native-only circuit breaker. The web has no local timer, so a browser tab
+  /// can only advance the station on an `ended` event or a poll; this app also
+  /// has a 2 s resync tick plus OEM audio-focus noise, and every one of those
+  /// paths can *claim* a track for all listeners. Without a cap a single phone
+  /// (bad CDN, wrong clock, dead row) rewrote the shared station endlessly — the
+  /// "changes music in a bad loop" crash. Counts claims that never reached
+  /// audible playback; the cap blocks further writes until the user acts.
+  int _liveClaimsInRow = 0;
+  bool _liveStationBlocked = false;
+  static const int _maxLiveClaimsWithoutPlayback = 3;
+  /// Rate-limits the "station never loaded, keep trying" recovery in the tick.
+  DateTime? _lastLiveStationRetryAt;
+
+  /// Boot autoplay retry. With the intro gate gone nothing taps "play" if the
+  /// first fetch came back empty (cold DNS / no network yet on app open), so the
+  /// radio keeps retrying on a gentle timer for about a minute.
+  Timer? _bootAutoplayTimer;
+  int _bootAutoplayAttempts = 0;
+  static const int _maxBootAutoplayAttempts = 6;
 
   // Subscriptions to clean up
   StreamSubscription? _primaryPositionSub;
@@ -154,9 +171,6 @@ class AudioService extends ChangeNotifier {
   bool get isRepeat => _isRepeat;
   bool get hasStarted => _hasStarted;
   double get volume => _volume;
-
-  /// True while the LOADING / "Let's GO" intro gate is still on screen.
-  bool get showLetsGoGate => _letsGoPending;
 
   /// Requested mode (Nuxt `wantLive`) — drives the header LIVE / GO LIVE label.
   bool get wantLive => _wantLive;
@@ -252,30 +266,60 @@ class AudioService extends ChangeNotifier {
       }
     }
 
-    // Fetch + preload until the first track can start instantly. Audio does NOT
-    // start here: the "Let's GO" gate owns the first play() call, exactly like
-    // the web WelcomeModal (and Android needs a user gesture for the media
-    // session to attach lock-screen controls to the very first track).
+    // Fetch + preload until the first track can start instantly, then play right
+    // away: the app starts on air. The web has to wait for the "Let's GO" tap
+    // because of the browser autoplay policy — that restriction does not exist
+    // here, and Android happily attaches the media session to the first play().
     await _loadInitialTracks();
+    await playMusic();
+    _armBootAutoplayRetry();
+  }
 
-    // A login that happened while the app was still loading asked to bypass the
-    // "Let's GO" gate — do it now that a track is actually ready.
-    if (_autoPlayAfterLogin && !_letsGoPending) {
-      _autoPlayAfterLogin = false;
+  /// Retries the boot playback until something is actually on air. Cancelled as
+  /// soon as audio starts, the user pauses on purpose, or another source (live
+  /// station / playlist) takes the players.
+  void _armBootAutoplayRetry() {
+    _cancelBootAutoplayRetry();
+    if (_isPlaying) return;
+    _bootAutoplayAttempts = 0;
+    late final Timer timer;
+    timer = Timer.periodic(const Duration(seconds: 10), (_) {
+      unawaited(_bootAutoplayTick(timer));
+    });
+    _bootAutoplayTimer = timer;
+  }
+
+  void _cancelBootAutoplayRetry() {
+    _bootAutoplayTimer?.cancel();
+    _bootAutoplayTimer = null;
+  }
+
+  Future<void> _bootAutoplayTick(Timer timer) async {
+    if (_isPlaying ||
+        _isLiveMode ||
+        _activePlaybackPlaylist != null ||
+        _bootAutoplayAttempts >= _maxBootAutoplayAttempts) {
+      timer.cancel();
+      if (identical(_bootAutoplayTimer, timer)) _bootAutoplayTimer = null;
+      return;
+    }
+    _bootAutoplayAttempts++;
+    print('Boot autoplay retry #$_bootAutoplayAttempts');
+
+    final track = activeTrack;
+    if (track == null || track.audio.isEmpty) {
+      await _loadInitialTracks();
+    }
+    if (!_isPlaying && !_isLiveMode && _activePlaybackPlaylist == null) {
       await playMusic();
     }
   }
 
   /// Nuxt login page (`skipLetsGo` + `autoPlayAfterLogin` → `playMusic()`):
-  /// releasing the intro gate right after a successful sign-in so the new user
-  /// lands on playing radio instead of the "Let's GO" screen.
-  Future<void> skipIntroGateAndAutoplay() async {
-    if (!_letsGoPending) return;
-    _autoPlayAfterLogin = true;
-    _letsGoPending = false;
-    notifyListeners();
-    if (!_isAudioReady) return; // initialize() finishes the job later
-    _autoPlayAfterLogin = false;
+  /// a successful sign-in starts the radio when nothing is playing. Native has no
+  /// intro gate, so this is just "make sure something is audible".
+  Future<void> startIfSilent() async {
+    if (_isPlaying) return;
     await playMusic();
   }
 
@@ -443,8 +487,7 @@ class AudioService extends ChangeNotifier {
     _activePlaybackPlaylist = playlist;
     _activePlaylistTracks = playable;
     _originAudio = false;
-    // Nuxt sets `letsGoModal = false` here — starting a playlist *is* the gesture.
-    _letsGoPending = false;
+    _cancelBootAutoplayRetry();
     notifyListeners();
 
     await _loadInitialTracks();
@@ -457,8 +500,6 @@ class AudioService extends ChangeNotifier {
     _activePlaybackPlaylist = null;
     _activePlaylistTracks = [];
     _originAudio = false;
-    // Nuxt `returnToMainRandom()`: `letsGoModal = false` before the refetch.
-    _letsGoPending = false;
     notifyListeners();
 
     await _loadInitialTracks();
@@ -856,13 +897,6 @@ class AudioService extends ChangeNotifier {
   }
 
   void _checkStuckPlayback() {
-    // Nuxt guards every loading-skip path with `if (letsGoModal.value) return`
-    // (armLoadingSkipTimer / skipToNextBecauseLoadingStuck /
-    // forcePlayNextAfterLoadFailure). While the intro gate is up nothing is
-    // expected to play yet, so a hung preloaded buffer must not skip tracks
-    // behind the user's back.
-    if (_letsGoPending) return;
-
     // Loading > 13s → always force next, even mid-transition. A hung
     // playNext/refill used to keep the cover spinner forever.
     if (_expectingPlayback && _isLoading) {
@@ -1129,16 +1163,10 @@ class AudioService extends ChangeNotifier {
     }
   }
 
-  /// Nuxt `playMusic()`. Releases the "Let's GO" gate and then toggles audio.
-  /// The first call always comes from the gate tap, so the very first playback
-  /// starts on a real user gesture; later calls are the cover tap (pause /
-  /// resume).
+  /// Nuxt `playMusic()` — toggles audio. Native has no intro gate, so the first
+  /// call comes from `initialize()` (autoplay on boot); later calls are the cover
+  /// tap (pause / resume).
   Future<void> playMusic() async {
-    if (_letsGoPending) {
-      _letsGoPending = false;
-      notifyListeners();
-    }
-
     if (_isPlaying) {
       await pauseAudio();
       return;
@@ -1174,13 +1202,11 @@ class AudioService extends ChangeNotifier {
     if (_wantLive == live) return;
     _wantLive = live;
     notifyListeners();
-    if (_letsGoPending) return;
     unawaited(_applyDesiredMode());
   }
 
   Future<void> _applyDesiredMode() async {
-    // The web watcher bails out while intro is open; enterLiveMode /
-    // exitLiveMode guard against a no-op switch themselves.
+    // enterLiveMode / exitLiveMode guard against a no-op switch themselves.
     if (_liveBusy) return;
     if (_wantLive && _isLiveMode) return;
     if (!_wantLive && !_isLiveMode) return;
@@ -1211,7 +1237,20 @@ class AudioService extends ChangeNotifier {
     _resumeAfterInterruption = false;
     _expectingPlayback = false;
     _disarmStuckWatch();
-    await activePlayer.pause();
+    // A deliberate pause ends the boot autoplay retry — the listener is in charge
+    // from here on.
+    _cancelBootAutoplayRetry();
+    // Nuxt `pauseAudio()` pauses BOTH elements. Pausing only the active one can
+    // leave a preloaded / mid-crossfade support buffer audible underneath, and in
+    // live mode it is the station that has to go completely quiet.
+    try {
+      await Future.wait([
+        _playerPrimary.pause(),
+        _playerSupport.pause(),
+      ]);
+    } catch (e) {
+      print('pauseAudio failed: $e');
+    }
     _isPlaying = false;
     notifyListeners();
   }
@@ -1236,7 +1275,7 @@ class AudioService extends ChangeNotifier {
     // In live mode "resume" means get back onto the shared station at the
     // correct elapsed position, not resume the local shuffle buffer.
     if (_isLiveMode) {
-      await _playLiveStation();
+      await _playLiveStation(fromUser: true);
       return;
     }
 
@@ -1419,9 +1458,18 @@ class AudioService extends ChangeNotifier {
   /// (`playLiveStation`), and only claim a new track on the second consecutive
   /// failure so one bad buffer on this device cannot skip the whole audience.
   Future<void> _recoverLiveFailure() async {
-    // Nuxt bails out while the intro modal is open and debounces duplicate
-    // skips (LOADING_SKIP_DEBOUNCE_MS) so two racing watchers can't both move.
-    if (_letsGoPending) return;
+    // Already given up? Stay quiet until the user does something — this is what
+    // stops a failing CDN / dead station row from turning into an endless claim
+    // loop that rewrites the station for every listener.
+    if (_liveStationBlocked) {
+      print('Live station is blocked after repeated failures — not claiming');
+      _markNotLoading();
+      notifyListeners();
+      return;
+    }
+
+    // Nuxt debounces duplicate skips (LOADING_SKIP_DEBOUNCE_MS) so two racing
+    // watchers can't both move.
     final skipNow = DateTime.now();
     final lastSkip = _lastLoadingSkipAt;
     if (lastSkip != null &&
@@ -1492,7 +1540,7 @@ class AudioService extends ChangeNotifier {
   Future<void> refreshRadio() async {
     // In live mode a pull-to-refresh just re-syncs the shared station.
     if (_isLiveMode) {
-      await _playLiveStation();
+      await _playLiveStation(fromUser: true);
       return;
     }
     if (_softRefreshInFlight) return;
@@ -1594,6 +1642,14 @@ class AudioService extends ChangeNotifier {
     _isRepeat = !_isRepeat;
     notifyListeners();
 
+    // Nuxt `isRepeat` is only consulted by `nextOrRepeat()`, and in live mode
+    // that function takes the station-advance branch first — repeat simply has
+    // no effect on air. Applying the player's native loop-one here would freeze
+    // the shared station on one song for *every* listener (the `completed`
+    // event that drives the live advance would never fire), so live never locks
+    // the buffer. `_nextOrRepeat()` restarts the track itself in shuffle.
+    if (_isLiveMode) return;
+
     // Use the players' native repeat-one mode. This guarantees that reaching
     // the end never advances automatically while repeat is enabled. A manual
     // Next action still switches players/tracks normally.
@@ -1651,6 +1707,7 @@ class AudioService extends ChangeNotifier {
     notifyListeners();
     try {
       _stopLiveSync();
+      _cancelBootAutoplayRetry();
 
       // Drop shuffle / playlist ownership of the players.
       _activePlaybackPlaylist = null;
@@ -1675,13 +1732,16 @@ class AudioService extends ChangeNotifier {
       _liveAdvanceQueued = false;
       _liveFailCount = 0;
       _lastLiveAdvanceAt = null;
+      _liveClaimsInRow = 0;
+      _liveStationBlocked = false;
+      _lastLiveStationRetryAt = null;
 
       _disarmStuckWatch();
       _markLoading();
       notifyListeners();
 
       await _ensureAudioSessionActive();
-      await _playLiveStation();
+      await _playLiveStation(fromUser: true);
 
       // Keep in sync with the station: realtime + polling (same as the web app),
       // plus a local resync tick to correct drift and advance on expiry.
@@ -1712,12 +1772,10 @@ class AudioService extends ChangeNotifier {
       _lastAppliedLiveIdentity = '';
       _originAudio = false;
 
-      // Fresh random dual buffers, then autoplay — like returning to shuffle.
-      await _loadInitialTracks();
-      _hasStarted = true;
-      if (_isAudioReady) {
-        await resumeAudio();
-      }
+      // Nuxt `exitLiveMode()` = `returnToMainRandom({ silent: true })`: reload the
+      // dual shuffle buffers and *always* play (`playAudio()` is unconditional),
+      // so a live session that was paused still hands back to a running radio.
+      await returnToMainRandom();
       if (!silent) {
         _emitToast('You can change tracks.', 'Random radio');
       }
@@ -1728,7 +1786,17 @@ class AudioService extends ChangeNotifier {
   }
 
   /// Ensures a live track is on air and plays it on the primary player.
-  Future<void> _playLiveStation() async {
+  ///
+  /// [fromUser] marks a deliberate request (play button, pull-to-refresh, entering
+  /// live): it clears the claim circuit breaker, so a listener who explicitly asks
+  /// for the station always gets one fresh attempt instead of being stuck behind a
+  /// failure counted by the background tick.
+  Future<void> _playLiveStation({bool fromUser = false}) async {
+    _lastLiveStationRetryAt = DateTime.now();
+    if (fromUser) {
+      _liveStationBlocked = false;
+      _liveClaimsInRow = 0;
+    }
     _expectingPlayback = true;
     _markLoading();
     notifyListeners();
@@ -1742,18 +1810,58 @@ class AudioService extends ChangeNotifier {
         _emitToast('Live radio is unavailable right now.', 'Live', ServiceToastKind.warning);
         return;
       }
-      await _applyLiveRow(row, play: true);
+      if (await _applyLiveRow(row, play: true)) {
+        await _advanceLiveStation(force: true);
+      }
     } catch (e) {
+      // Nuxt `playLiveStation()` catch → `forcePlayNextAfterLoadFailure()`: the
+      // station is re-synced once locally before it is taken over for everyone.
       print('playLiveStation failed: $e');
       _markNotLoading();
       notifyListeners();
+      await _recoverLiveFailure();
+    }
+  }
+
+  /// Nuxt `waitForAudioReady(myMusic.value)` inside `applyLiveRow`. The station
+  /// clock — and especially the "this track is already over" decision — can only
+  /// be judged once the media duration is known. Reading a half-buffered player
+  /// used to mistake a partial buffer for the end of the song, which made the
+  /// app claim a brand new station track (skipping it for every other listener).
+  Future<void> _waitLiveBufferReady() async {
+    if (_playerPrimary.processingState == ProcessingState.ready &&
+        _playerPrimary.duration != null) {
+      return;
+    }
+
+    final done = Completer<void>();
+    final sub = _playerPrimary.playerStateStream.listen((state) {
+      if (!done.isCompleted &&
+          state.processingState == ProcessingState.ready &&
+          _playerPrimary.duration != null) {
+        done.complete();
+      }
+    });
+    try {
+      await done.future.timeout(const Duration(seconds: 6));
+    } on TimeoutException {
+      // Not fatal: the play confirmation below still gets its own window, and a
+      // hard failure now travels through the station-recovery path.
+      print('Live buffer stayed unready — continuing with the station clock');
+    } finally {
+      await sub.cancel();
     }
   }
 
   /// Loads [row] on the primary player (only if the audio actually changed) and
   /// seeks to the elapsed station time so every listener is phase-aligned.
-  Future<void> _applyLiveRow(LiveStation row, {bool play = true}) async {
-    if (!row.hasAudio) return;
+  ///
+  /// Returns `true` when the on-air track is already over (Nuxt's `'ended'`),
+  /// which the caller turns into a station advance. Load/play failures **throw**
+  /// instead of advancing: exactly like Nuxt's `applyLiveRow`, so the caller can
+  /// retry the station (`_recoverLiveFailure`) before taking it over.
+  Future<bool> _applyLiveRow(LiveStation row, {bool play = true}) async {
+    if (!row.hasAudio) return false;
 
     _originAudio = false;
     _currentOriginTrack = row.toMusic();
@@ -1765,23 +1873,21 @@ class AudioService extends ChangeNotifier {
         await _playerPrimary.setUrl(row.audio).timeout(_setUrlTimeout);
         _liveLoadedAudio = row.audio;
       } catch (e) {
-        print('Live setUrl failed — advancing station: $e');
-        await _advanceLiveStation(force: true);
-        return;
+        print('Live setUrl failed: $e');
+        rethrow;
       }
     }
 
+    await _waitLiveBufferReady();
+
     final elapsed = LiveStation.getElapsedSeconds(row.startedAt);
     final mediaDuration = _playerPrimary.duration;
-    final mediaSeconds =
-        (mediaDuration?.inMilliseconds ?? 0) / 1000.0;
+    final mediaSeconds = (mediaDuration?.inMilliseconds ?? 0) / 1000.0;
 
-    // Already at/past the end of the buffered media → the station moved on.
-    if (mediaSeconds > 0 &&
-        elapsed >= mediaSeconds - 0.35 &&
-        (LiveStation.parseDurationToSeconds(row.duration) ?? 0) <= 0) {
-      await _advanceLiveStation(force: true);
-      return;
+    // Nuxt `seekLiveAudioToElapsed()`: at/past the end of the buffered media the
+    // station has moved on — no DB-duration exception to this rule.
+    if (mediaSeconds > 0 && elapsed >= (mediaSeconds - 0.35).clamp(0.4, 1e9)) {
+      return true;
     }
 
     final target = Duration(milliseconds: (elapsed * 1000).round());
@@ -1795,23 +1901,67 @@ class AudioService extends ChangeNotifier {
     if (mediaDuration != null && mediaDuration > Duration.zero) {
       _duration = mediaDuration;
     }
+    // Re-baseline the stuck-playhead clock. It still holds the *previous* buffer's
+    // position, so joining a station 100 s in (or a shorter track) would never
+    // satisfy `pos > _lastProgressPosition + 150ms` — the 11 s watchdog then read
+    // healthy live audio as frozen and advanced the shared station for everyone.
+    _lastProgressPosition = _playerPrimary.position;
+    _lastProgressAt = DateTime.now();
     notifyListeners();
+
+    // Nuxt `applyLiveRow()` → `updateVolume()` before playing. The live branch of
+    // `updateVolume()` always uses the full user volume (no end-of-track fade),
+    // which also clears any fade the shuffle buffer was mid-way through — without
+    // it the station could start quiet or completely silent.
+    _restoreFullVolume();
 
     if (play) {
       try {
         await _playActiveAndConfirm();
         _consecutiveLoadFailures = 0;
         _liveFailCount = 0;
+        // The station is audible: hand the claim budget back, so a later genuine
+        // end-of-track can advance normally again.
+        _liveClaimsInRow = 0;
+        _liveStationBlocked = false;
       } catch (e) {
-        print('Live play confirm failed — advancing station: $e');
-        await _advanceLiveStation(force: true);
+        print('Live play confirm failed: $e');
+        rethrow;
       }
     }
+    return false;
   }
 
   /// Reacts to a station update from realtime / polling.
+  ///
+  /// Everything it touches is the primary player, and a player that has no media
+  /// (or is still buffering) **throws** on seek/play. This runs inside an
+  /// `unawaited(...)` from the Supabase subscription, so an escaping error becomes
+  /// an uncaught async error and Android kills the app — which is what "it crashes
+  /// when I switch to live" looked like. Nuxt wraps the same function in a
+  /// try/catch (`→ forcePlayNextAfterLoadFailure`); the outer wrapper does that here.
   Future<void> _onLiveStationChange(LiveStation row) async {
+    try {
+      await _handleLiveStationChange(row);
+    } catch (e) {
+      print('onLiveStationChange failed: $e');
+      try {
+        await _recoverLiveFailure();
+      } catch (_) {}
+    }
+  }
+
+  Future<void> _handleLiveStationChange(LiveStation row) async {
     if (!_isLiveMode || !row.hasAudio) return;
+
+    // Nuxt's subscription tests expiry *before* the identity match, so a row that
+    // aged out is moved on even when it is the one already applied. Checking it
+    // after the identity branch made that case a no-op (drift was still small).
+    if (LiveStation.isTrackExpired(row)) {
+      _liveStation = row;
+      await _advanceLiveStation(force: true);
+      return;
+    }
     if (_liveAdvanceBusy) return;
 
     final identity = row.identity;
@@ -1830,8 +1980,14 @@ class AudioService extends ChangeNotifier {
         await _advanceLiveStation(force: true);
         return;
       }
-      await _playerPrimary
-          .seek(Duration(milliseconds: (elapsed * 1000).round()));
+      try {
+        await _playerPrimary
+            .seek(Duration(milliseconds: (elapsed * 1000).round()));
+      } catch (e) {
+        // A drift correction is cosmetic — never let it bubble up (see above).
+        print('Live drift seek skipped: $e');
+        return;
+      }
       // ...and keeps the element sounding if the seek paused the buffer.
       if (_expectingPlayback && !_playerPrimary.playing) {
         unawaited(_playerPrimary.play().catchError((Object _) {}));
@@ -1840,16 +1996,23 @@ class AudioService extends ChangeNotifier {
     }
 
     _liveStation = row;
-    if (LiveStation.isTrackExpired(row)) {
+    if (await _applyLiveRow(row, play: _expectingPlayback)) {
       await _advanceLiveStation(force: true);
-      return;
     }
-    await _applyLiveRow(row, play: _expectingPlayback);
   }
 
   /// Claims/publishes the next track on the shared station and plays it.
   Future<void> _advanceLiveStation({bool force = false}) async {
     if (!_isLiveMode) return;
+    // Circuit breaker open (too many claims that never reached playback): reading
+    // the station is still allowed — sync/drift happen in the tick and in
+    // `_onLiveStationChange` — but this app stops *writing* the shared row.
+    if (_liveStationBlocked) {
+      print('Live advance skipped — claim circuit breaker is open');
+      _markNotLoading();
+      notifyListeners();
+      return;
+    }
     if (_liveAdvanceBusy) {
       // Nuxt queues the request instead of dropping it — a track that ends (or
       // a station update that arrives) during an in-flight advance still gets
@@ -1874,39 +2037,43 @@ class AudioService extends ChangeNotifier {
         // never mistaken for an expired one.
         final current = await _liveService.fetchLiveStation() ?? _liveStation;
 
-        // A different, still-valid track is already on air → just sync to it. This
-        // is the key guard that stops the "advance → advance → advance" runaway:
-        // we only ever claim a NEW track when the on-air row is genuinely expired
-        // or we truly reached its end (force).
-        if (current != null &&
-            current.hasAudio &&
-            !LiveStation.isTrackExpired(current) &&
-            current.identity != _lastAppliedLiveIdentity) {
-          await _applyLiveRow(current, play: true);
-          // The apply may have hit the buffer end and queued another pass.
-          if (!_liveAdvanceQueued) break;
-          force = true;
-          continue;
-        }
-
-        // Nothing forced and the on-air track is fine (already applied) → no-op.
+        // Nuxt: unless we truly reached the end (`force`), a still-valid track
+        // that is on air is only synced to. Claiming a new song when the on-air
+        // row is healthy is what made the station flip through tracks.
         if (!force &&
             current != null &&
             current.hasAudio &&
             !LiveStation.isTrackExpired(current)) {
-          _markNotLoading();
-          break;
+          final ended = await _applyLiveRow(current, play: _expectingPlayback);
+          if (!ended) break;
         }
 
-        // Throttle real claims (≥2s apart) so a burst of events cannot flip
-        // through many tracks in a couple of seconds.
+        // Throttle real claims so a burst of events cannot flip through many
+        // tracks in a couple of seconds. The web never needs this because it has
+        // no local timer; on native the tick + focus noise make 6s the floor.
         final last = _lastLiveAdvanceAt;
         if (last != null &&
-            DateTime.now().difference(last) < const Duration(seconds: 2)) {
+            DateTime.now().difference(last) < _liveClaimThrottle) {
           _markNotLoading();
           break;
         }
         _lastLiveAdvanceAt = DateTime.now();
+
+        // Count the write. If this many claims in a row never became audible,
+        // something is wrong here (CDN, dead row, clock) — stop rewriting the
+        // station for every other listener and wait for the user.
+        if (++_liveClaimsInRow > _maxLiveClaimsWithoutPlayback) {
+          _liveStationBlocked = true;
+          print('Live station claimed $_liveClaimsInRow tracks without playback '
+              '— blocking station writes');
+          _markNotLoading();
+          _emitToast(
+            'Live radio is unavailable right now.',
+            'Live',
+            ServiceToastKind.warning,
+          );
+          break;
+        }
 
         final next = await _liveService.advanceLiveStation(
           currentRow: current,
@@ -1917,15 +2084,24 @@ class AudioService extends ChangeNotifier {
           break;
         }
         _lastAppliedLiveIdentity = '';
-        await _applyLiveRow(next, play: true);
+        if (await _applyLiveRow(next, play: _expectingPlayback)) {
+          // The freshly claimed row was already over → keep advancing (Nuxt sets
+          // `force = true` here so the next pass skips the sync shortcut).
+          force = true;
+          _liveAdvanceQueued = true;
+        }
+
+        // Nuxt `while (liveAdvanceQueued && isLiveMode)`: stop as soon as the
+        // station holds a track that is actually playable, otherwise a single
+        // user-initiated advance would claim several songs in a row.
         if (!_liveAdvanceQueued) break;
-        // The freshly claimed row was already over → keep advancing (Nuxt sets
-        // `force = true` here so the next pass skips the expiry shortcut).
-        force = true;
       }
     } catch (e) {
+      // Nuxt `advanceSharedLiveStation()` catch → `forcePlayNextAfterLoadFailure()`
+      // (fire and forget, so the busy flag is released immediately).
       print('advanceLiveStation failed: $e');
       _markNotLoading();
+      unawaited(_recoverLiveFailure());
     } finally {
       _liveAdvanceBusy = false;
       if (_liveAdvanceQueued && _isLiveMode) {
@@ -1942,25 +2118,62 @@ class AudioService extends ChangeNotifier {
     _liveResyncTimer?.cancel();
     _liveResyncTimer = Timer.periodic(
       const Duration(seconds: 2),
-      (_) => _liveResyncTick(),
+      (_) => unawaited(_liveResyncTick()),
     );
   }
 
-  void _liveResyncTick() {
+  Future<void> _liveResyncTick() async {
     if (!_isLiveMode) return;
-    final row = _liveStation;
-    if (row == null) return;
 
-    if (LiveStation.isTrackExpired(row)) {
-      unawaited(_advanceLiveStation(force: true));
+    // Nuxt has no timer at all while the user is paused: nothing may claim a new
+    // station track (that would skip songs for every other listener). Resuming
+    // goes through `resumeAudio()` → `_playLiveStation()`, which re-syncs to
+    // whatever is on air — or publishes the next track if it aged out.
+    if (!_expectingPlayback) return; // user-paused — don't fight them
+
+    final row = _liveStation;
+    if (row == null) {
+      // Nothing was ever applied — the very first station load failed. Without
+      // this the app would sit in live mode in permanent silence (spinner
+      // cleared, no subscription row cached, watchdog idle) until the user
+      // toggled out and back in. Rate-limited: it used to hammer Supabase every
+      // 2s forever when the station was simply unreachable.
+      if (_liveStationBlocked || _liveAdvanceBusy) return;
+      final lastRetry = _lastLiveStationRetryAt;
+      if (lastRetry != null &&
+          DateTime.now().difference(lastRetry) < const Duration(seconds: 8)) {
+        return;
+      }
+      unawaited(_playLiveStation());
       return;
     }
 
-    if (!_expectingPlayback) return; // user-paused — don't fight them
+    if (LiveStation.isTrackExpired(row)) {
+      // The cached row says the song is over. Never claim on that alone — a stale
+      // cache, a wrong device clock or a bogus duration would rewrite the shared
+      // station for everybody. Re-read the authoritative row and only advance if
+      // the database agrees that it is really expired.
+      final fresh = await _liveService.fetchLiveStation();
+      if (fresh == null || !fresh.hasAudio) return;
+      _liveStation = fresh;
+
+      if (!LiveStation.isTrackExpired(fresh)) {
+        // Somebody already moved the station on: sync to it, don't claim it.
+        if (fresh.identity != _lastAppliedLiveIdentity) {
+          await _onLiveStationChange(fresh);
+        }
+        return;
+      }
+      await _advanceLiveStation(force: true);
+      return;
+    }
 
     final elapsed = LiveStation.getElapsedSeconds(row.startedAt);
     final mediaSeconds = (_playerPrimary.duration?.inMilliseconds ?? 0) / 1000.0;
     if (mediaSeconds > 0 && elapsed >= mediaSeconds - 0.35) {
+      // The station clock passed the end of the loaded media. Same rule as the
+      // web's `maybeAdvanceLiveIfFinished()`, and the claim breaker caps it if
+      // the media duration turns out to be nonsense.
       unawaited(_advanceLiveStation(force: true));
       return;
     }
@@ -1968,8 +2181,14 @@ class AudioService extends ChangeNotifier {
     final drift =
         (_playerPrimary.position.inMilliseconds / 1000.0 - elapsed).abs();
     if (drift > 2.5) {
+      // Guarded: a seek on an idle / still-buffering player throws, and an
+      // unhandled async error from a Timer.periodic callback crashes Android.
       unawaited(
-        _playerPrimary.seek(Duration(milliseconds: (elapsed * 1000).round())),
+        _playerPrimary
+            .seek(Duration(milliseconds: (elapsed * 1000).round()))
+            .catchError((Object e) {
+          print('Live resync seek failed: $e');
+        }),
       );
     }
     if (!_playerPrimary.playing) {
@@ -1986,11 +2205,13 @@ class AudioService extends ChangeNotifier {
     _liveAdvanceQueued = false;
     _liveFailCount = 0;
     _liveAdvanceBusy = false;
+    _lastAppliedLiveIdentity = '';
   }
 
   @override
   void dispose() {
     _stopLiveSync();
+    _cancelBootAutoplayRetry();
     _disarmStuckWatch();
     _interruptionSub?.cancel();
     _becomingNoisySub?.cancel();

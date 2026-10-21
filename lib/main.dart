@@ -11,40 +11,50 @@ import 'services/media_audio_handler.dart';
 import 'screens/player_screen.dart';
 import 'theme/app_colors.dart';
 
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
+void main() {
+  // Everything runs inside one guarded zone. Player calls (seek / play on a
+  // buffering or idle just_audio player) can throw asynchronously from inside a
+  // Timer.periodic or a Supabase realtime callback — an uncaught async error in
+  // a release build takes the whole app down, which is exactly the "switching to
+  // live crashes it" report. Live code also handles these locally now; this is
+  // the safety net so a stray one can never kill the radio.
+  runZonedGuarded<Future<void>>(() async {
+    WidgetsFlutterBinding.ensureInitialized();
 
-  // Edge-to-edge so the player background can paint under status / nav bars.
-  await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-  SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
-    statusBarColor: Colors.transparent,
-    statusBarIconBrightness: Brightness.light,
-    systemNavigationBarColor: Colors.transparent,
-    systemNavigationBarIconBrightness: Brightness.light,
-    systemNavigationBarContrastEnforced: false,
-  ));
+    // Edge-to-edge so the player background can paint under status / nav bars.
+    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
+      statusBarColor: Colors.transparent,
+      statusBarIconBrightness: Brightness.light,
+      systemNavigationBarColor: Colors.transparent,
+      systemNavigationBarIconBrightness: Brightness.light,
+      systemNavigationBarContrastEnforced: false,
+    ));
 
-  // Initialize Supabase
-  await SupabaseService.initialize();
+    // Initialize Supabase
+    await SupabaseService.initialize();
 
-  final authService = AuthService();
-  await authService.init();
+    final authService = AuthService();
+    await authService.init();
 
-  final playlistService = PlaylistService(authService);
-  final audioService = AudioService();
+    final playlistService = PlaylistService(authService);
+    final audioService = AudioService();
 
-  // Render the Flutter UI before starting the media session or loading tracks.
-  // This guarantees that an audio-service startup error can never leave Android
-  // on a blank launch window.
-  runApp(MyApp(
-    audioService: audioService,
-    authService: authService,
-    playlistService: playlistService,
-  ));
+    // Render the Flutter UI before starting the media session or loading tracks.
+    // This guarantees that an audio-service startup error can never leave Android
+    // on a blank launch window.
+    runApp(MyApp(
+      audioService: audioService,
+      authService: authService,
+      playlistService: playlistService,
+    ));
 
-  // Lock-screen / notification transport controls need the media session up
-  // before the first play(), plus Android 13+ notification permission.
-  unawaited(_bootstrapPlayback(audioService));
+    // Lock-screen / notification transport controls need the media session up
+    // before the first play(), plus Android 13+ notification permission.
+    unawaited(_bootstrapPlayback(audioService));
+  }, (error, stackTrace) {
+    debugPrint('Uncaught async error: $error\n$stackTrace');
+  });
 }
 
 Future<void> _bootstrapPlayback(AudioService audioService) async {

@@ -14,7 +14,6 @@ import '../widgets/genre_selector.dart';
 import '../widgets/app_header.dart';
 import '../widgets/playlist_selector.dart';
 import '../widgets/app_toast.dart';
-import '../widgets/welcome_overlay.dart';
 
 /// Draws a solid right-pointing triangle (▶), matching the Nuxt frontend's
 /// `.button-icon` CSS-border triangle trick, but as real vector geometry so
@@ -252,7 +251,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
             final currentTime = widget.audioService.currentTime;
             final duration = widget.audioService.duration;
             final isLiveMode = widget.audioService.isLiveMode;
-            final showLetsGo = widget.audioService.showLetsGoGate;
 
             // Check if video should be shown
             final shouldShowVideo = activeTrack != null &&
@@ -864,18 +862,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   onChromeTap: _revealChrome,
                 ),
 
-                // Nuxt WelcomeModal: teleported above every piece of chrome and
-                // only released by a "Let's GO" tap (which is also the first
-                // play() call). Blocks all player taps while it is up, exactly
-                // like the web's `onMobilePageClick` early-return on letsGoModal.
-                if (showLetsGo)
-                  Positioned.fill(
-                    child: WelcomeOverlay(
-                      isReady: activeTrack != null &&
-                          widget.audioService.isAudioReady,
-                      onLetsGo: () => widget.audioService.playMusic(),
-                    ),
-                  ),
+                // No "Let's GO" intro gate here (unlike the web): browsers need
+                // the tap to unlock audio, a native app does not — initialize()
+                // starts playback by itself and the cover spinner shows while the
+                // first buffer is still loading.
               ],
             );
           },
