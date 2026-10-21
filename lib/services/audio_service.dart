@@ -390,9 +390,12 @@ class AudioService extends ChangeNotifier {
       _emitToast('No music available', 'Player', ServiceToastKind.warning);
       return;
     }
-    if (_isAudioReady) {
-      await resumeAudio();
-    }
+    // Boot / first-start must go on air on its own (native has no "Let's GO"
+    // tap). The track is already setUrl'd by _loadInitialTracks(), so even when
+    // the buffer never reached "instantly playable" we still start it and let
+    // _playActiveAndConfirm() wait for the first audible sample — instead of
+    // silently staying paused until the 10s boot-retry timer happens to fire.
+    await resumeAudio();
   }
 
   Music? _pickTrackFromActivePlaylist(Music? excludeTrack) {
@@ -1709,22 +1712,48 @@ class AudioService extends ChangeNotifier {
       _stopLiveSync();
       _cancelBootAutoplayRetry();
 
+      // Take the players out of shuffle / playlist control *before* touching
+      // them, so the dual-player state listeners cannot auto-replay the
+      // outgoing random track while it is being torn down:
+      //  • `_expectingPlayback = false` turns `_recoverUnexpectedPause` and the
+      //    stuck watchdog into no-ops (they only kick play() when it is true);
+      //  • `_isTransitioning = true` blocks `_handleTrackCompleted` → skip;
+      //  • `_originAudio = false` pins the active side to the *primary* player
+      //    (the one live uses), so a stray event can never resume support.
+      // Simply calling stop() was not enough: a stop/pause still emits player
+      // state events, and the handlers used to answer them by playing the old
+      // shuffle buffer again — which is why the random music kept mixing with
+      // the live feed.
+      _expectingPlayback = false;
+      _resumeAfterInterruption = false;
+      _isTransitioning = true;
+      _originAudio = false;
+      _ignoreCompletedUntil =
+          DateTime.now().add(const Duration(milliseconds: 1500));
+
       // Drop shuffle / playlist ownership of the players.
       _activePlaybackPlaylist = null;
       _activePlaylistTracks = [];
       _isRepeat = false;
       await _playerPrimary.setLoopMode(LoopMode.off);
       await _playerSupport.setLoopMode(LoopMode.off);
-      try {
-        await _playerSupport.stop();
-      } catch (_) {}
+      // Fully silence BOTH shuffle buffers *before* the station is fetched.
+      for (final p in <AudioPlayer>[_playerPrimary, _playerSupport]) {
+        try {
+          await p.pause();
+        } catch (_) {}
+        try {
+          await p.stop();
+        } catch (_) {}
+      }
+      _isPlaying = false;
 
-      _originAudio = false;
       _playbackHistory.clear();
       _consecutiveLoadFailures = 0;
       _isLiveMode = true;
       _hasStarted = true;
       _expectingPlayback = true;
+      _isTransitioning = false;
       _liveLoadedAudio = '';
       _lastAppliedLiveIdentity = '';
       _liveStation = null;
@@ -1823,6 +1852,30 @@ class AudioService extends ChangeNotifier {
     }
   }
 
+  /// Builds the [Music] for the on-air station row.
+  ///
+  /// [LiveStation.toMusic] stamps `id` with the fixed `live-music` row id (1),
+  /// which is NOT a `musics.id`. Playing is unaffected (it keys off the audio
+  /// url), but "add the playing track to my playlist" and the "is it already in
+  /// a playlist" check both use `activeTrack.id` — writing id 1 fails the
+  /// foreign-key insert (the reported API error). Resolve the real catalogue id
+  /// from the audio url so saving/removing a live track targets the actual song.
+  Future<Music> _liveMusicForRow(LiveStation row) async {
+    final base = row.toMusic();
+    final realId = await _liveService.resolveMusicIdByAudio(row.audio);
+    if (realId == null || realId <= 0 || realId == base.id) return base;
+    return Music(
+      id: realId,
+      title: base.title,
+      artist: base.artist,
+      cover: base.cover,
+      audio: base.audio,
+      genre: base.genre,
+      duration: base.duration,
+      isActive: true,
+    );
+  }
+
   /// Nuxt `waitForAudioReady(myMusic.value)` inside `applyLiveRow`. The station
   /// clock — and especially the "this track is already over" decision — can only
   /// be judged once the media duration is known. Reading a half-buffered player
@@ -1864,7 +1917,7 @@ class AudioService extends ChangeNotifier {
     if (!row.hasAudio) return false;
 
     _originAudio = false;
-    _currentOriginTrack = row.toMusic();
+    _currentOriginTrack = await _liveMusicForRow(row);
     _liveStation = row;
     _lastAppliedLiveIdentity = row.identity;
 

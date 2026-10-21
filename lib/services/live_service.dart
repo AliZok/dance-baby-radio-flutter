@@ -28,6 +28,40 @@ class LiveService {
   LiveStation? _currentStation;
   LiveStation? get currentStation => _currentStation;
 
+  /// Cache of `musics.id` resolved from a station audio url. The shared
+  /// `live-music` row only stores its own fixed id (= [liveStationId]), never
+  /// the catalogue id of the song that is on air, so saving the live track to a
+  /// playlist needs the real id looked up once per track (then reused for
+  /// membership checks / removes without re-hitting Supabase every sync tick).
+  final Map<String, int> _musicIdByAudio = {};
+
+  /// Resolves the real `musics.id` for the track currently on air, keyed by its
+  /// audio url. Returns null when no catalogue row matches (e.g. a station
+  /// stamped with a url that is not in `musics`).
+  Future<int?> resolveMusicIdByAudio(String audioUrl) async {
+    if (audioUrl.isEmpty) return null;
+    final cached = _musicIdByAudio[audioUrl];
+    if (cached != null) return cached;
+    try {
+      final row = await _client
+          .from('musics')
+          .select('id')
+          .eq('audio', audioUrl)
+          .maybeSingle();
+      final raw = row?['id'];
+      final id = raw is int ? raw : int.tryParse('${raw ?? ''}');
+      if (id != null && id > 0) {
+        _musicIdByAudio[audioUrl] = id;
+        return id;
+      }
+      return null;
+    } catch (e) {
+      // ignore: avoid_print
+      print('resolveMusicIdByAudio Error: $e');
+      return null;
+    }
+  }
+
   Future<LiveStation?> fetchLiveStation() async {
     try {
       final data = await _client

@@ -444,48 +444,54 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                           });
                                         },
                                       ),
-                                      const SizedBox(width: 8),
-                                      // Repeat — frontend: square 44×44, radius 7px;
-                                      // active = icon opacity 1 + soft shadow (not neon blast)
-                                      GestureDetector(
-                                        onTap: () async {
-                                          await widget.audioService.toggleRepeat();
-                                          if (!mounted) return;
-                                          final on = widget.audioService.isRepeat;
-                                          // Nuxt toggleRepeat() copy.
-                                          AppToast.info(
-                                            this.context,
-                                            on
-                                                ? 'This track will repeat when it ends.'
-                                                : 'Repeat off — next track will play as usual.',
-                                            title: on ? 'Repeat on' : 'Repeat off',
-                                          );
-                                        },
-                                        behavior: HitTestBehavior.opaque,
-                                        child: AnimatedContainer(
-                                          duration:
-                                              const Duration(milliseconds: 180),
-                                          width: 44,
-                                          height: 44,
-                                          decoration: BoxDecoration(
-                                            color: const Color(0xEB0A161A),
-                                            borderRadius: BorderRadius.circular(7),
-                                            boxShadow: isRepeat
-                                                ? [
-                                                    BoxShadow(
-                                                      color: const Color(
-                                                        0xFF52DCFF,
-                                                      ).withOpacity(0.2),
-                                                      blurRadius: 8,
-                                                      offset: const Offset(0, 2),
-                                                    ),
-                                                  ]
-                                                : null,
+                                      // Repeat is hidden in live mode (Nuxt also
+                                      // hides it): the shared broadcast station is
+                                      // not ours to loop, so there is no per-listener
+                                      // repeat on air. Mirror the GENRE / Next `v-show`.
+                                      if (!isLiveMode) ...[
+                                        const SizedBox(width: 8),
+                                        // Repeat — frontend: square 44×44, radius 7px;
+                                        // active = icon opacity 1 + soft shadow (not neon blast)
+                                        GestureDetector(
+                                          onTap: () async {
+                                            await widget.audioService.toggleRepeat();
+                                            if (!mounted) return;
+                                            final on = widget.audioService.isRepeat;
+                                            // Nuxt toggleRepeat() copy.
+                                            AppToast.info(
+                                              this.context,
+                                              on
+                                                  ? 'This track will repeat when it ends.'
+                                                  : 'Repeat off — next track will play as usual.',
+                                              title: on ? 'Repeat on' : 'Repeat off',
+                                            );
+                                          },
+                                          behavior: HitTestBehavior.opaque,
+                                          child: AnimatedContainer(
+                                            duration:
+                                                const Duration(milliseconds: 180),
+                                            width: 44,
+                                            height: 44,
+                                            decoration: BoxDecoration(
+                                              color: const Color(0xEB0A161A),
+                                              borderRadius: BorderRadius.circular(7),
+                                              boxShadow: isRepeat
+                                                  ? [
+                                                      BoxShadow(
+                                                        color: const Color(
+                                                          0xFF52DCFF,
+                                                        ).withOpacity(0.2),
+                                                        blurRadius: 8,
+                                                        offset: const Offset(0, 2),
+                                                      ),
+                                                    ]
+                                                  : null,
+                                            ),
+                                            alignment: Alignment.center,
+                                            child: _buildRepeatIcon(isRepeat),
                                           ),
-                                          alignment: Alignment.center,
-                                          child: _buildRepeatIcon(isRepeat),
                                         ),
-                                      ),
+                                      ],
                                     ],
                                   ),
                                 ],
