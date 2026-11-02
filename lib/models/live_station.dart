@@ -129,7 +129,7 @@ class LiveStation {
   Music toMusic() {
     return Music(
       id: id,
-      title: title.isEmpty ? 'Live Radio' : title,
+      title: title.isEmpty ? '' : title,
       artist: artist,
       cover: cover,
       audio: audio,
