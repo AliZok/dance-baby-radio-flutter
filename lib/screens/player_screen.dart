@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -13,6 +15,7 @@ import '../widgets/video_background.dart';
 import '../widgets/genre_selector.dart';
 import '../widgets/app_header.dart';
 import '../widgets/playlist_selector.dart';
+import '../widgets/welcome_gate.dart';
 import '../widgets/app_toast.dart';
 
 /// Draws a solid right-pointing triangle (▶), matching the Nuxt frontend's
@@ -92,12 +95,33 @@ class _PlayerScreenState extends State<PlayerScreen> {
   int _headerDismissToken = 0;
   bool _wasLiveMode = false;
 
+  // --------------------------------------------------------------------------
+  // Intro gate (Nuxt `WelcomeModal` loading state + `useIntroGate` black cover)
+  //
+  // The web paints a black boot cover, then the animated LOADING screen, and
+  // only reveals the player once the first track can start instantly. Native
+  // has no autoplay lock to wait for a tap, so the gate releases by itself the
+  // moment the first track is really audible — the user must never see the
+  // cover spinner or a half-loaded player as the first frame of the app.
+  // --------------------------------------------------------------------------
+  bool _introGateMounted = true;
+  bool _introGateVisible = true;
+  DateTime? _introGateShownAt;
+  Timer? _introGateFadeTimer;
+
+  /// Shortest time on screen, so a warm cache cannot make the gate flash.
+  static const _introGateMinVisible = Duration(milliseconds: 900);
+  /// Hard ceiling: a dead network must not trap the user behind the cover.
+  static const _introGateHardTimeout = Duration(seconds: 20);
+  static const _introGateFade = Duration(milliseconds: 650);
+
   static const _chromeDuration = Duration(milliseconds: 340);
   static const _chromeCurve = Curves.easeOutCubic;
 
   @override
   void initState() {
     super.initState();
+    _introGateShownAt = DateTime.now();
     // The web raises mode / player toasts from inside its own functions, not
     // from the button handler, so a deferred LIVE request still announces
     // itself when the gate releases. Hand the same ability to AudioService.
@@ -119,6 +143,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
     // open the moment the user returns to shuffle.
     _wasLiveMode = widget.audioService.isLiveMode;
     widget.audioService.addListener(_onAudioServiceChanged);
+    // Boot runs outside the widget tree (main.dart fires initialize() after
+    // runApp), so the first ready state can easily land before this screen
+    // ever subscribed to a notification.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _maybeReleaseIntroGate();
+    });
   }
 
   void _onAudioServiceChanged() {
@@ -127,10 +157,52 @@ class _PlayerScreenState extends State<PlayerScreen> {
       setState(() => _isGenreOpen = false);
     }
     _wasLiveMode = live;
+    _maybeReleaseIntroGate();
+  }
+
+  /// Drops the LOADING cover — once, and only when audio is genuinely on air
+  /// (or the hard timeout says the boot is not going to make it).
+  void _maybeReleaseIntroGate() {
+    if (!_introGateVisible) return;
+
+    final shownAt = _introGateShownAt ?? DateTime.now();
+    final elapsed = DateTime.now().difference(shownAt);
+    final service = widget.audioService;
+
+    // Same "actually audible" contract the service uses to clear its cover
+    // spinner: playing, nothing buffering, and either the buffer reported ready
+    // or the playhead already moving (a moving clock cannot lie about samples).
+    final onAir = service.activeTrack != null &&
+        service.isPlaying &&
+        !service.isLoading &&
+        (service.isAudioReady ||
+            service.currentTime > const Duration(milliseconds: 80));
+    final timedOut = elapsed >= _introGateHardTimeout;
+
+    if (!onAir && !timedOut) return;
+    if (!timedOut && elapsed < _introGateMinVisible) {
+      // Ready before the minimum display time: re-check when it expires,
+      // instead of waiting for an unrelated notifyListeners().
+      _introGateFadeTimer?.cancel();
+      _introGateFadeTimer = Timer(_introGateMinVisible - elapsed, () {
+        if (mounted) _maybeReleaseIntroGate();
+      });
+      return;
+    }
+
+    setState(() => _introGateVisible = false);
+    _introGateFadeTimer?.cancel();
+    // Keep it mounted (and painting) through the fade, then drop it for good.
+    _introGateFadeTimer = Timer(_introGateFade, () {
+      _introGateFadeTimer = null;
+      if (!mounted) return;
+      setState(() => _introGateMounted = false);
+    });
   }
 
   @override
   void dispose() {
+    _introGateFadeTimer?.cancel();
     widget.audioService.removeListener(_onAudioServiceChanged);
     if (widget.audioService.onToast != null) {
       widget.audioService.onToast = null;
@@ -868,10 +940,23 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   onChromeTap: _revealChrome,
                 ),
 
-                // No "Let's GO" intro gate here (unlike the web): browsers need
-                // the tap to unlock audio, a native app does not — initialize()
-                // starts playback by itself and the cover spinner shows while the
-                // first buffer is still loading.
+                // Intro gate — the native twin of the web's WelcomeModal
+                // LOADING screen. It covers header, chrome and player alike,
+                // so the very first thing the user sees is the radio already
+                // playing. Browsers need the "Let's GO" tap to unlock audio;
+                // here initialize() goes on air by itself and the cover fades
+                // out the moment the first track is audible.
+                if (_introGateMounted)
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: AnimatedOpacity(
+                        opacity: _introGateVisible ? 1 : 0,
+                        duration: _introGateFade,
+                        curve: Curves.easeOut,
+                        child: const WelcomeGate(),
+                      ),
+                    ),
+                  ),
               ],
             );
           },
