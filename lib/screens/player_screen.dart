@@ -88,6 +88,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _isGenreOpen = false;
   bool _isPlaylistOpen = false;
   bool _isNextPressed = false;
+
   /// Local scrub position while the user drags the timeline — avoids fighting
   /// the position stream and matches Nuxt `isSeeking`.
   bool _isScrubbing = false;
@@ -111,8 +112,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   /// Shortest time on screen, so a warm cache cannot make the gate flash.
   static const _introGateMinVisible = Duration(milliseconds: 900);
+
   /// Hard ceiling: a dead network must not trap the user behind the cover.
-  static const _introGateHardTimeout = Duration(seconds: 20);
+  /// Above the worst legitimate boot — the intro buffer race (10 s) plus one
+  /// play budget on the origin track (10 s) plus the support hand-over (10 s).
+  static const _introGateHardTimeout = Duration(seconds: 31);
   static const _introGateFade = Duration(milliseconds: 650);
 
   static const _chromeDuration = Duration(milliseconds: 340);
@@ -313,136 +317,139 @@ class _PlayerScreenState extends State<PlayerScreen> {
       extendBody: true,
       extendBodyBehindAppBar: true,
       body: ListenableBuilder(
-          listenable: widget.audioService,
-          builder: (context, child) {
-            final activeTrack = widget.audioService.activeTrack;
-            final isPlaying = widget.audioService.isPlaying;
-            final isLoading = widget.audioService.isLoading;
-            final isRepeat = widget.audioService.isRepeat;
-            final volume = widget.audioService.volume;
-            final currentTime = widget.audioService.currentTime;
-            final duration = widget.audioService.duration;
-            final isLiveMode = widget.audioService.isLiveMode;
+        listenable: widget.audioService,
+        builder: (context, child) {
+          final activeTrack = widget.audioService.activeTrack;
+          final isPlaying = widget.audioService.isPlaying;
+          final isLoading = widget.audioService.isLoading;
+          final isRepeat = widget.audioService.isRepeat;
+          final volume = widget.audioService.volume;
+          final currentTime = widget.audioService.currentTime;
+          final duration = widget.audioService.duration;
+          final isLiveMode = widget.audioService.isLiveMode;
 
-            // Check if video should be shown
-            final shouldShowVideo = activeTrack != null &&
-                (activeTrack.genre.contains('electronic') || activeTrack.genre.contains('relax'));
+          // Check if video should be shown
+          final shouldShowVideo = activeTrack != null &&
+              (activeTrack.genre.contains('electronic') ||
+                  activeTrack.genre.contains('relax'));
 
-            return Stack(
-              children: [
-                // Video sits behind and blends through the dimmed cover for
-                // electronic/relax, matching the mobile frontend layering.
-                Positioned.fill(
-                  child: VideoBackground(shouldShow: shouldShowVideo),
-                ),
+          return Stack(
+            children: [
+              // Video sits behind and blends through the dimmed cover for
+              // electronic/relax, matching the mobile frontend layering.
+              Positioned.fill(
+                child: VideoBackground(shouldShow: shouldShowVideo),
+              ),
 
-                // Full-screen stretched cover — fills edge-to-edge (top/bottom
-                // included). Dark translucent layer keeps it atmospheric while
-                // allowing the video to show through.
-                Positioned.fill(
-                  child: Opacity(
-                    opacity: shouldShowVideo ? 0.46 : 0.58,
-                    child: ColorFiltered(
-                      colorFilter: const ColorFilter.mode(
-                        Color(0x66000000),
-                        BlendMode.srcATop,
-                      ),
-                      child: AnimatedSwitcher(
-                        duration: const Duration(seconds: 1),
-                        child: activeTrack?.cover.isNotEmpty == true
-                            ? SizedBox.expand(
-                                key: ValueKey(activeTrack!.cover),
-                                child: CachedNetworkImage(
-                                  imageUrl: activeTrack.cover,
-                                  fit: BoxFit.fill,
-                                  width: double.infinity,
-                                  height: double.infinity,
-                                  alignment: Alignment.center,
-                                  placeholder: (context, url) => Image.asset(
-                                    'assets/images/background-dance-1.jpg',
-                                    fit: BoxFit.fill,
-                                    width: double.infinity,
-                                    height: double.infinity,
-                                    alignment: Alignment.center,
-                                  ),
-                                  errorWidget: (context, url, error) =>
-                                      Image.asset(
-                                    'assets/images/background-dance-1.jpg',
-                                    fit: BoxFit.fill,
-                                    width: double.infinity,
-                                    height: double.infinity,
-                                    alignment: Alignment.center,
-                                  ),
-                                ),
-                              )
-                            : Image.asset(
-                                'assets/images/background-dance-1.jpg',
-                                key: const ValueKey('default_bg'),
+              // Full-screen stretched cover — fills edge-to-edge (top/bottom
+              // included). Dark translucent layer keeps it atmospheric while
+              // allowing the video to show through.
+              Positioned.fill(
+                child: Opacity(
+                  opacity: shouldShowVideo ? 0.46 : 0.58,
+                  child: ColorFiltered(
+                    colorFilter: const ColorFilter.mode(
+                      Color(0x66000000),
+                      BlendMode.srcATop,
+                    ),
+                    child: AnimatedSwitcher(
+                      duration: const Duration(seconds: 1),
+                      child: activeTrack?.cover.isNotEmpty == true
+                          ? SizedBox.expand(
+                              key: ValueKey(activeTrack!.cover),
+                              child: CachedNetworkImage(
+                                imageUrl: activeTrack.cover,
                                 fit: BoxFit.fill,
                                 width: double.infinity,
                                 height: double.infinity,
                                 alignment: Alignment.center,
+                                placeholder: (context, url) => Image.asset(
+                                  'assets/images/background-dance-1.jpg',
+                                  fit: BoxFit.fill,
+                                  width: double.infinity,
+                                  height: double.infinity,
+                                  alignment: Alignment.center,
+                                ),
+                                errorWidget: (context, url, error) =>
+                                    Image.asset(
+                                  'assets/images/background-dance-1.jpg',
+                                  fit: BoxFit.fill,
+                                  width: double.infinity,
+                                  height: double.infinity,
+                                  alignment: Alignment.center,
+                                ),
                               ),
+                            )
+                          : Image.asset(
+                              'assets/images/background-dance-1.jpg',
+                              key: const ValueKey('default_bg'),
+                              fit: BoxFit.fill,
+                              width: double.infinity,
+                              height: double.infinity,
+                              alignment: Alignment.center,
+                            ),
+                    ),
+                  ),
+                ),
+              ),
+
+              const Positioned.fill(
+                child: Opacity(
+                  opacity: 0.5,
+                  child: StarsBackground(),
+                ),
+              ),
+
+              // LED light-dance equalizer (mirrors Nuxt LedLights) — sits
+              // above stars, below chrome, and ignores pointer events.
+              Positioned.fill(
+                child: LedLightsBackground(
+                  audioService: widget.audioService,
+                ),
+              ),
+
+              // Captures empty-page taps; interactive controls are painted
+              // later in this Stack and therefore win hit testing. The mobile
+              // web only toggles chrome on a tap — no swipe shortcuts.
+              Positioned.fill(
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: _onBackgroundTap,
+                ),
+              ),
+
+              // Playlist mode badge
+              if (widget.audioService.isPlaylistMode)
+                Positioned(
+                  top: MediaQuery.of(context).padding.top + 52,
+                  left: 16,
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withOpacity(0.45),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(
+                          color: AppColors.primary.withOpacity(0.35)),
+                    ),
+                    child: Text(
+                      '♪ ${widget.audioService.activePlaybackPlaylist?.name ?? 'Playlist'}',
+                      style: const TextStyle(
+                        color: AppColors.primary,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
                       ),
                     ),
                   ),
                 ),
 
-                const Positioned.fill(
-                  child: Opacity(
-                    opacity: 0.5,
-                    child: StarsBackground(),
-                  ),
-                ),
-
-                // LED light-dance equalizer (mirrors Nuxt LedLights) — sits
-                // above stars, below chrome, and ignores pointer events.
-                Positioned.fill(
-                  child: LedLightsBackground(
-                    audioService: widget.audioService,
-                  ),
-                ),
-
-                // Captures empty-page taps; interactive controls are painted
-                // later in this Stack and therefore win hit testing. The mobile
-                // web only toggles chrome on a tap — no swipe shortcuts.
-                Positioned.fill(
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onTap: _onBackgroundTap,
-                  ),
-                ),
-
-                // Playlist mode badge
-                if (widget.audioService.isPlaylistMode)
-                  Positioned(
-                    top: MediaQuery.of(context).padding.top + 52,
-                    left: 16,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                      decoration: BoxDecoration(
-                        color: Colors.black.withOpacity(0.45),
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(color: AppColors.primary.withOpacity(0.35)),
-                      ),
-                      child: Text(
-                        '♪ ${widget.audioService.activePlaybackPlaylist?.name ?? 'Playlist'}',
-                        style: const TextStyle(
-                          color: AppColors.primary,
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                  ),
-
-                // 5. Main Player Box (Center)
-                Center(
-                  child: Transform.translate(
-                    offset: const Offset(0, -27.5),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 24.0),
-                      child: Stack(
+              // 5. Main Player Box (Center)
+              Center(
+                child: Transform.translate(
+                  offset: const Offset(0, -27.5),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24.0),
+                    child: Stack(
                       alignment: Alignment.center,
                       clipBehavior: Clip.none,
                       children: [
@@ -460,116 +467,129 @@ class _PlayerScreenState extends State<PlayerScreen> {
                           child: IgnorePointer(
                             ignoring: !_showControls,
                             child: AnimatedOpacity(
-                            duration: const Duration(milliseconds: 300),
-                            opacity: _showControls ? 1.0 : 0.0,
-                            child: SizedBox(
-                              width: 300,
-                              child: Row(
-                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                children: [
-                                  // Volume Slider (Left side, NO speaker icon)
-                                  Container(
-                                    width: 100,
-                                    height: 40,
-                                    padding: const EdgeInsets.symmetric(horizontal: 6),
-                                    decoration: BoxDecoration(
-                                      color:
-                                          const Color(0xFF10191A).withOpacity(0.78),
-                                      borderRadius: BorderRadius.circular(30),
-                                    ),
-                                    alignment: Alignment.center,
-                                    child: SliderTheme(
-                                      data: SliderTheme.of(context).copyWith(
-                                        activeTrackColor: const Color(0xFF58D1EF),
-                                        inactiveTrackColor: Colors.white24,
-                                        thumbColor: const Color(0xFF4E4E4E),
-                                        trackHeight: 5.0,
-                                        thumbShape: const RoundSliderThumbShape(
-                                          enabledThumbRadius: 7.0,
-                                        ),
-                                        overlayShape: SliderComponentShape.noOverlay,
+                              duration: const Duration(milliseconds: 300),
+                              opacity: _showControls ? 1.0 : 0.0,
+                              child: SizedBox(
+                                width: 300,
+                                child: Row(
+                                  mainAxisAlignment:
+                                      MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    // Volume Slider (Left side, NO speaker icon)
+                                    Container(
+                                      width: 100,
+                                      height: 40,
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 6),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFF10191A)
+                                            .withOpacity(0.78),
+                                        borderRadius: BorderRadius.circular(30),
                                       ),
-                                      child: Slider(
-                                        value: volume,
-                                        min: 0.0,
-                                        max: 1.0,
-                                        onChanged: widget.audioService.setVolume,
-                                      ),
-                                    ),
-                                  ),
-
-                                  Row(
-                                    children: [
-                                      // Playlist button + menu
-                                      PlaylistSelector(
-                                        authService: widget.authService,
-                                        audioService: widget.audioService,
-                                        playlistService: widget.playlistService,
-                                        isOpen: _isPlaylistOpen,
-                                        onOpenChanged: (open) {
-                                          setState(() {
-                                            _isPlaylistOpen = open;
-                                            if (open) {
-                                              _isGenreOpen = false;
-                                              _showControls = true;
-                                            }
-                                          });
-                                        },
-                                      ),
-                                      // Repeat is hidden in live mode (Nuxt also
-                                      // hides it): the shared broadcast station is
-                                      // not ours to loop, so there is no per-listener
-                                      // repeat on air. Mirror the GENRE / Next `v-show`.
-                                      if (!isLiveMode) ...[
-                                        const SizedBox(width: 8),
-                                        // Repeat — frontend: square 44×44, radius 7px;
-                                        // active = icon opacity 1 + soft shadow (not neon blast)
-                                        GestureDetector(
-                                          onTap: () async {
-                                            await widget.audioService.toggleRepeat();
-                                            if (!mounted) return;
-                                            final on = widget.audioService.isRepeat;
-                                            // Nuxt toggleRepeat() copy.
-                                            AppToast.info(
-                                              this.context,
-                                              on
-                                                  ? 'This track will repeat when it ends.'
-                                                  : 'Repeat off — next track will play as usual.',
-                                              title: on ? 'Repeat on' : 'Repeat off',
-                                            );
-                                          },
-                                          behavior: HitTestBehavior.opaque,
-                                          child: AnimatedContainer(
-                                            duration:
-                                                const Duration(milliseconds: 180),
-                                            width: 44,
-                                            height: 44,
-                                            decoration: BoxDecoration(
-                                              color: const Color(0xEB0A161A),
-                                              borderRadius: BorderRadius.circular(7),
-                                              boxShadow: isRepeat
-                                                  ? [
-                                                      BoxShadow(
-                                                        color: const Color(
-                                                          0xFF52DCFF,
-                                                        ).withOpacity(0.2),
-                                                        blurRadius: 8,
-                                                        offset: const Offset(0, 2),
-                                                      ),
-                                                    ]
-                                                  : null,
-                                            ),
-                                            alignment: Alignment.center,
-                                            child: _buildRepeatIcon(isRepeat),
+                                      alignment: Alignment.center,
+                                      child: SliderTheme(
+                                        data: SliderTheme.of(context).copyWith(
+                                          activeTrackColor:
+                                              const Color(0xFF58D1EF),
+                                          inactiveTrackColor: Colors.white24,
+                                          thumbColor: const Color(0xFF4E4E4E),
+                                          trackHeight: 5.0,
+                                          thumbShape:
+                                              const RoundSliderThumbShape(
+                                            enabledThumbRadius: 7.0,
                                           ),
+                                          overlayShape:
+                                              SliderComponentShape.noOverlay,
                                         ),
+                                        child: Slider(
+                                          value: volume,
+                                          min: 0.0,
+                                          max: 1.0,
+                                          onChanged:
+                                              widget.audioService.setVolume,
+                                        ),
+                                      ),
+                                    ),
+
+                                    Row(
+                                      children: [
+                                        // Playlist button + menu
+                                        PlaylistSelector(
+                                          authService: widget.authService,
+                                          audioService: widget.audioService,
+                                          playlistService:
+                                              widget.playlistService,
+                                          isOpen: _isPlaylistOpen,
+                                          onOpenChanged: (open) {
+                                            setState(() {
+                                              _isPlaylistOpen = open;
+                                              if (open) {
+                                                _isGenreOpen = false;
+                                                _showControls = true;
+                                              }
+                                            });
+                                          },
+                                        ),
+                                        // Repeat is hidden in live mode (Nuxt also
+                                        // hides it): the shared broadcast station is
+                                        // not ours to loop, so there is no per-listener
+                                        // repeat on air. Mirror the GENRE / Next `v-show`.
+                                        if (!isLiveMode) ...[
+                                          const SizedBox(width: 8),
+                                          // Repeat — frontend: square 44×44, radius 7px;
+                                          // active = icon opacity 1 + soft shadow (not neon blast)
+                                          GestureDetector(
+                                            onTap: () async {
+                                              await widget.audioService
+                                                  .toggleRepeat();
+                                              if (!mounted) return;
+                                              final on =
+                                                  widget.audioService.isRepeat;
+                                              // Nuxt toggleRepeat() copy.
+                                              AppToast.info(
+                                                this.context,
+                                                on
+                                                    ? 'This track will repeat when it ends.'
+                                                    : 'Repeat off — next track will play as usual.',
+                                                title: on
+                                                    ? 'Repeat on'
+                                                    : 'Repeat off',
+                                              );
+                                            },
+                                            behavior: HitTestBehavior.opaque,
+                                            child: AnimatedContainer(
+                                              duration: const Duration(
+                                                  milliseconds: 180),
+                                              width: 44,
+                                              height: 44,
+                                              decoration: BoxDecoration(
+                                                color: const Color(0xEB0A161A),
+                                                borderRadius:
+                                                    BorderRadius.circular(7),
+                                                boxShadow: isRepeat
+                                                    ? [
+                                                        BoxShadow(
+                                                          color: const Color(
+                                                            0xFF52DCFF,
+                                                          ).withOpacity(0.2),
+                                                          blurRadius: 8,
+                                                          offset: const Offset(
+                                                              0, 2),
+                                                        ),
+                                                      ]
+                                                    : null,
+                                              ),
+                                              alignment: Alignment.center,
+                                              child: _buildRepeatIcon(isRepeat),
+                                            ),
+                                          ),
+                                        ],
                                       ],
-                                    ],
-                                  ),
-                                ],
+                                    ),
+                                  ],
+                                ),
                               ),
                             ),
-                          ),
                           ),
                         ),
 
@@ -582,30 +602,33 @@ class _PlayerScreenState extends State<PlayerScreen> {
                           child: GestureDetector(
                             onTap: _revealChrome,
                             child: Container(
-                            width: 300,
-                            padding: const EdgeInsets.fromLTRB(18, 40, 18, 18),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF0C0C0C).withOpacity(0.64),
-                              borderRadius: BorderRadius.circular(20),
-                              border: Border.all(
-                                color: const Color(0xFF003E47),
-                                width: 1,
-                              ),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: const Color(0xFF111A1E).withOpacity(0.8),
-                                  blurRadius: 30,
+                              width: 300,
+                              padding:
+                                  const EdgeInsets.fromLTRB(18, 40, 18, 18),
+                              decoration: BoxDecoration(
+                                color:
+                                    const Color(0xFF0C0C0C).withOpacity(0.64),
+                                borderRadius: BorderRadius.circular(20),
+                                border: Border.all(
+                                  color: const Color(0xFF003E47),
+                                  width: 1,
                                 ),
-                              ],
-                            ),
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                // Cover Image / Play Button. Only the centered
-                                // play area owns the playback tap; tapping the
-                                // poster around it reaches the card and toggles
-                                // the sliding details, as on mobile web.
-                                Stack(
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: const Color(0xFF111A1E)
+                                        .withOpacity(0.8),
+                                    blurRadius: 30,
+                                  ),
+                                ],
+                              ),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  // Cover Image / Play Button. Only the centered
+                                  // play area owns the playback tap; tapping the
+                                  // poster around it reaches the card and toggles
+                                  // the sliding details, as on mobile web.
+                                  Stack(
                                     alignment: Alignment.center,
                                     children: [
                                       // Cover Image
@@ -613,11 +636,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                         width: 240,
                                         height: 240,
                                         decoration: BoxDecoration(
-                                          borderRadius: BorderRadius.circular(20),
+                                          borderRadius:
+                                              BorderRadius.circular(20),
                                           boxShadow: isPlaying
                                               ? [
                                                   BoxShadow(
-                                                    color: const Color(0xFF84F3FF).withOpacity(0.16),
+                                                    color:
+                                                        const Color(0xFF84F3FF)
+                                                            .withOpacity(0.16),
                                                     blurRadius: 12,
                                                     spreadRadius: 4,
                                                   ),
@@ -625,16 +651,19 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                               : [],
                                         ),
                                         child: ClipRRect(
-                                          borderRadius: BorderRadius.circular(20),
-                                          child: activeTrack?.cover.isNotEmpty == true
+                                          borderRadius:
+                                              BorderRadius.circular(20),
+                                          child: activeTrack
+                                                      ?.cover.isNotEmpty ==
+                                                  true
                                               ? CachedNetworkImage(
                                                   imageUrl: activeTrack!.cover,
                                                   fit: BoxFit.cover,
                                                   placeholder: (context, url) =>
                                                       _buildDefaultCoverBrand(),
-                                                  errorWidget:
-                                                      (context, url, error) =>
-                                                          _buildDefaultCoverBrand(),
+                                                  errorWidget: (context, url,
+                                                          error) =>
+                                                      _buildDefaultCoverBrand(),
                                                 )
                                               : _buildDefaultCoverBrand(),
                                         ),
@@ -687,181 +716,188 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                         ),
                                     ],
                                   ),
-                                const SizedBox(height: 16),
+                                  const SizedBox(height: 16),
 
-                                // Seek Slider — commit on finger-up only
-                                // (Nuxt: isSeeking + seek on change), so a
-                                // drag cannot race into the next track.
-                                // Nuxt `:disabled="isLiveMode"` +
-                                // `.slider.live-locked { pointer-events: none;
-                                // opacity: .55 }` — the station clock is not
-                                // ours to scrub, and the thumb must not move.
-                                Opacity(
-                                  opacity: isLiveMode ? 0.55 : 1.0,
-                                  child: IgnorePointer(
-                                    ignoring: isLiveMode,
-                                    child: SliderTheme(
-                                  data: SliderTheme.of(context).copyWith(
-                                    activeTrackColor: const Color(0xFF58D1EF),
-                                    inactiveTrackColor: Colors.white24,
-                                    thumbColor: const Color(0xFF4E4E4E),
-                                    trackHeight: 4.0,
-                                    thumbShape: const RoundSliderThumbShape(
-                                      enabledThumbRadius: 8.0,
-                                    ),
-                                  ),
-                                  child: Slider(
-                                    value: () {
-                                      final maxSecs = duration.inSeconds > 0
-                                          ? duration.inSeconds.toDouble()
-                                          : 1.0;
-                                      final raw = _isScrubbing
-                                          ? _scrubSeconds
-                                          : currentTime.inSeconds.toDouble();
-                                      return raw.clamp(0.0, maxSecs);
-                                    }(),
-                                    min: 0.0,
-                                    max: duration.inSeconds > 0
-                                        ? duration.inSeconds.toDouble()
-                                        : 1.0,
-                                    onChangeStart: (val) {
-                                      setState(() {
-                                        _isScrubbing = true;
-                                        _scrubSeconds = val;
-                                      });
-                                    },
-                                    onChanged: (val) {
-                                      setState(() => _scrubSeconds = val);
-                                    },
-                                    onChangeEnd: (val) {
-                                      setState(() {
-                                        _isScrubbing = false;
-                                        _scrubSeconds = val;
-                                      });
-                                      widget.audioService.seek(
-                                        Duration(seconds: val.toInt()),
-                                      );
-                                    },
-                                  ),
-                                    ),
-                                  ),
-                                ),
-
-                                // Mobile frontend keeps metadata collapsed on
-                                // first render (`max-h-0`) and slides it open
-                                // when the player body is tapped.
-                                ClipRect(
-                                  child: AnimatedSize(
-                                    duration: const Duration(seconds: 1),
-                                    curve: Curves.easeInOut,
-                                    alignment: Alignment.topCenter,
-                                    child: _showControls
-                                        ? Padding(
-                                            padding: const EdgeInsets.only(
-                                              left: 8,
-                                              right: 8,
-                                              top: 8,
-                                            ),
-                                            child: Row(
-                                              crossAxisAlignment:
-                                                  CrossAxisAlignment.start,
-                                              mainAxisAlignment:
-                                                  MainAxisAlignment.spaceBetween,
-                                              children: [
-                                                Expanded(
-                                                  child: Column(
-                                                    crossAxisAlignment:
-                                                        CrossAxisAlignment.start,
-                                                    children: [
-                                                      Text(
-                                                        activeTrack?.title ??
-                                                            'Dance Baby Radio',
-                                                        style: const TextStyle(
-                                                          color:
-                                                              Color(0xFF23C1D2),
-                                                          fontSize: 12,
-                                                          fontWeight:
-                                                              FontWeight.bold,
-                                                        ),
-                                                        maxLines: 1,
-                                                        overflow: TextOverflow
-                                                            .ellipsis,
-                                                      ),
-                                                      Text(
-                                                        activeTrack?.artist ??
-                                                            '',
-                                                        style: TextStyle(
-                                                          color: const Color(
-                                                            0xFF23C1D2,
-                                                          ).withOpacity(0.7),
-                                                          fontSize: 10,
-                                                        ),
-                                                        maxLines: 1,
-                                                        overflow: TextOverflow
-                                                            .ellipsis,
-                                                      ),
-                                                    ],
-                                                  ),
-                                                ),
-                                                const SizedBox(width: 8),
-                                                Text(
-                                                  '${_formatDuration(currentTime)} / '
-                                                  '${_formatDuration(duration)}',
-                                                  style: TextStyle(
-                                                    color: Colors.white
-                                                        .withOpacity(0.6),
-                                                    fontSize: 9,
-                                                  ),
-                                                ),
-                                              ],
-                                            ),
-                                          )
-                                        : const SizedBox(
-                                            width: double.infinity,
-                                            height: 0,
+                                  // Seek Slider — commit on finger-up only
+                                  // (Nuxt: isSeeking + seek on change), so a
+                                  // drag cannot race into the next track.
+                                  // Nuxt `:disabled="isLiveMode"` +
+                                  // `.slider.live-locked { pointer-events: none;
+                                  // opacity: .55 }` — the station clock is not
+                                  // ours to scrub, and the thumb must not move.
+                                  Opacity(
+                                    opacity: isLiveMode ? 0.55 : 1.0,
+                                    child: IgnorePointer(
+                                      ignoring: isLiveMode,
+                                      child: SliderTheme(
+                                        data: SliderTheme.of(context).copyWith(
+                                          activeTrackColor:
+                                              const Color(0xFF58D1EF),
+                                          inactiveTrackColor: Colors.white24,
+                                          thumbColor: const Color(0xFF4E4E4E),
+                                          trackHeight: 4.0,
+                                          thumbShape:
+                                              const RoundSliderThumbShape(
+                                            enabledThumbRadius: 8.0,
                                           ),
+                                        ),
+                                        child: Slider(
+                                          value: () {
+                                            final maxSecs = duration.inSeconds >
+                                                    0
+                                                ? duration.inSeconds.toDouble()
+                                                : 1.0;
+                                            final raw = _isScrubbing
+                                                ? _scrubSeconds
+                                                : currentTime.inSeconds
+                                                    .toDouble();
+                                            return raw.clamp(0.0, maxSecs);
+                                          }(),
+                                          min: 0.0,
+                                          max: duration.inSeconds > 0
+                                              ? duration.inSeconds.toDouble()
+                                              : 1.0,
+                                          onChangeStart: (val) {
+                                            setState(() {
+                                              _isScrubbing = true;
+                                              _scrubSeconds = val;
+                                            });
+                                          },
+                                          onChanged: (val) {
+                                            setState(() => _scrubSeconds = val);
+                                          },
+                                          onChangeEnd: (val) {
+                                            setState(() {
+                                              _isScrubbing = false;
+                                              _scrubSeconds = val;
+                                            });
+                                            widget.audioService.seek(
+                                              Duration(seconds: val.toInt()),
+                                            );
+                                          },
+                                        ),
+                                      ),
+                                    ),
                                   ),
-                                ),
-                              ],
-                            ),
+
+                                  // Mobile frontend keeps metadata collapsed on
+                                  // first render (`max-h-0`) and slides it open
+                                  // when the player body is tapped.
+                                  ClipRect(
+                                    child: AnimatedSize(
+                                      duration: const Duration(seconds: 1),
+                                      curve: Curves.easeInOut,
+                                      alignment: Alignment.topCenter,
+                                      child: _showControls
+                                          ? Padding(
+                                              padding: const EdgeInsets.only(
+                                                left: 8,
+                                                right: 8,
+                                                top: 8,
+                                              ),
+                                              child: Row(
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.start,
+                                                mainAxisAlignment:
+                                                    MainAxisAlignment
+                                                        .spaceBetween,
+                                                children: [
+                                                  Expanded(
+                                                    child: Column(
+                                                      crossAxisAlignment:
+                                                          CrossAxisAlignment
+                                                              .start,
+                                                      children: [
+                                                        Text(
+                                                          activeTrack?.title ??
+                                                              'Dance Baby Radio',
+                                                          style:
+                                                              const TextStyle(
+                                                            color: Color(
+                                                                0xFF23C1D2),
+                                                            fontSize: 12,
+                                                            fontWeight:
+                                                                FontWeight.bold,
+                                                          ),
+                                                          maxLines: 1,
+                                                          overflow: TextOverflow
+                                                              .ellipsis,
+                                                        ),
+                                                        Text(
+                                                          activeTrack?.artist ??
+                                                              '',
+                                                          style: TextStyle(
+                                                            color: const Color(
+                                                              0xFF23C1D2,
+                                                            ).withOpacity(0.7),
+                                                            fontSize: 10,
+                                                          ),
+                                                          maxLines: 1,
+                                                          overflow: TextOverflow
+                                                              .ellipsis,
+                                                        ),
+                                                      ],
+                                                    ),
+                                                  ),
+                                                  const SizedBox(width: 8),
+                                                  Text(
+                                                    '${_formatDuration(currentTime)} / '
+                                                    '${_formatDuration(duration)}',
+                                                    style: TextStyle(
+                                                      color: Colors.white
+                                                          .withOpacity(0.6),
+                                                      fontSize: 9,
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            )
+                                          : const SizedBox(
+                                              width: double.infinity,
+                                              height: 0,
+                                            ),
+                                    ),
+                                  ),
+                                ],
+                              ),
                             ),
                           ),
                         ),
                       ],
                     ),
                   ),
+                ),
+              ),
+
+              // 6. Genre — Nuxt `v-show="!isLiveMode"`: hidden only in live
+              // mode (a playlist is still a valid shuffle source); slides in
+              // from the left edge with the chrome.
+              if (!isLiveMode)
+                AnimatedPositioned(
+                  duration: _chromeDuration,
+                  curve: _chromeCurve,
+                  bottom: 27 + MediaQuery.of(context).padding.bottom,
+                  left: _showChrome ? 20 : -120,
+                  child: IgnorePointer(
+                    ignoring: !_showChrome,
+                    child: GenreSelector(
+                      audioService: widget.audioService,
+                      isOpen: _isGenreOpen,
+                      onToggle: () {
+                        setState(() {
+                          _isGenreOpen = !_isGenreOpen;
+                          if (_isGenreOpen) _isPlaylistOpen = false;
+                        });
+                      },
+                    ),
                   ),
                 ),
 
-                // 6. Genre — Nuxt `v-show="!isLiveMode"`: hidden only in live
-                // mode (a playlist is still a valid shuffle source); slides in
-                // from the left edge with the chrome.
-                if (!isLiveMode)
-                  AnimatedPositioned(
-                    duration: _chromeDuration,
-                    curve: _chromeCurve,
-                    bottom: 27 + MediaQuery.of(context).padding.bottom,
-                    left: _showChrome ? 20 : -120,
-                    child: IgnorePointer(
-                      ignoring: !_showChrome,
-                      child: GenreSelector(
-                        audioService: widget.audioService,
-                        isOpen: _isGenreOpen,
-                        onToggle: () {
-                          setState(() {
-                            _isGenreOpen = !_isGenreOpen;
-                            if (_isGenreOpen) _isPlaylistOpen = false;
-                          });
-                        },
-                      ),
-                    ),
-                  ),
-
-                // 7. Next — Nuxt `v-show="!isLiveMode"`: the shared live
-                // station is not ours to skip, so the button disappears in live
-                // mode. Slides in from the right edge with the chrome.
-                if (!isLiveMode)
-                  AnimatedPositioned(
+              // 7. Next — Nuxt `v-show="!isLiveMode"`: the shared live
+              // station is not ours to skip, so the button disappears in live
+              // mode. Slides in from the right edge with the chrome.
+              if (!isLiveMode)
+                AnimatedPositioned(
                   duration: _chromeDuration,
                   curve: _chromeCurve,
                   bottom: 27 + MediaQuery.of(context).padding.bottom,
@@ -871,8 +907,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                     child: GestureDetector(
                       onTapDown: (_) => setState(() => _isNextPressed = true),
                       onTapUp: (_) => setState(() => _isNextPressed = false),
-                      onTapCancel: () =>
-                          setState(() => _isNextPressed = false),
+                      onTapCancel: () => setState(() => _isNextPressed = false),
                       onTap: () {
                         _closeOverlayMenus();
                         widget.audioService.playNextMusic(fromUser: true);
@@ -930,37 +965,37 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   ),
                 ),
 
-                // Header — slides in from top (login / account menu)
-                AppHeader(
-                  authService: widget.authService,
-                  audioService: widget.audioService,
-                  playlistService: widget.playlistService,
-                  dismissToken: _headerDismissToken,
-                  visible: _showChrome,
-                  onChromeTap: _revealChrome,
-                ),
+              // Header — slides in from top (login / account menu)
+              AppHeader(
+                authService: widget.authService,
+                audioService: widget.audioService,
+                playlistService: widget.playlistService,
+                dismissToken: _headerDismissToken,
+                visible: _showChrome,
+                onChromeTap: _revealChrome,
+              ),
 
-                // Intro gate — the native twin of the web's WelcomeModal
-                // LOADING screen. It covers header, chrome and player alike,
-                // so the very first thing the user sees is the radio already
-                // playing. Browsers need the "Let's GO" tap to unlock audio;
-                // here initialize() goes on air by itself and the cover fades
-                // out the moment the first track is audible.
-                if (_introGateMounted)
-                  Positioned.fill(
-                    child: IgnorePointer(
-                      child: AnimatedOpacity(
-                        opacity: _introGateVisible ? 1 : 0,
-                        duration: _introGateFade,
-                        curve: Curves.easeOut,
-                        child: const WelcomeGate(),
-                      ),
+              // Intro gate — the native twin of the web's WelcomeModal
+              // LOADING screen. It covers header, chrome and player alike,
+              // so the very first thing the user sees is the radio already
+              // playing. Browsers need the "Let's GO" tap to unlock audio;
+              // here initialize() goes on air by itself and the cover fades
+              // out the moment the first track is audible.
+              if (_introGateMounted)
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: AnimatedOpacity(
+                      opacity: _introGateVisible ? 1 : 0,
+                      duration: _introGateFade,
+                      curve: Curves.easeOut,
+                      child: const WelcomeGate(),
                     ),
                   ),
-              ],
-            );
-          },
-        ),
+                ),
+            ],
+          );
+        },
+      ),
     );
   }
 }

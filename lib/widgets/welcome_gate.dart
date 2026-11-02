@@ -37,21 +37,28 @@ class _WelcomeGateState extends State<WelcomeGate>
   void initState() {
     super.initState();
     // CSS: gridDrift 12s linear infinite
-    _grid = AnimationController(vsync: this, duration: const Duration(seconds: 12))
-      ..repeat();
+    _grid =
+        AnimationController(vsync: this, duration: const Duration(seconds: 12))
+          ..repeat();
     // CSS: glowPulse 3.5s ease-in-out infinite
-    _glow = AnimationController(vsync: this, duration: const Duration(milliseconds: 3500))
+    _glow = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 3500))
       ..repeat();
     // CSS: scan 1.6s / 2.4s linear infinite (second one offset by -0.8s)
-    _scanFast = AnimationController(vsync: this, duration: const Duration(milliseconds: 1600))
+    _scanFast = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 1600))
       ..repeat();
-    _scanSlow = AnimationController(vsync: this, duration: const Duration(milliseconds: 2400))
+    _scanSlow = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 2400))
       ..repeat();
     // CSS: textPulse 1.5s infinite ease-in-out
-    _pulse = AnimationController(vsync: this, duration: const Duration(milliseconds: 1500))
+    _pulse = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 1500))
       ..repeat();
     // CSS: glitch 2s infinite (+ reversed twin)
-    _glitch = AnimationController(vsync: this, duration: const Duration(seconds: 2))..repeat();
+    _glitch =
+        AnimationController(vsync: this, duration: const Duration(seconds: 2))
+          ..repeat();
   }
 
   @override
@@ -140,8 +147,9 @@ class _WelcomeGateState extends State<WelcomeGate>
             child: _TitleText(
               baseStyle: baseStyle,
               color: color,
-              opacity:
-                  (0.3 + 0.2 * math.sin(t * math.pi * 2)).clamp(0.0, 1.0).toDouble(),
+              opacity: (0.3 + 0.2 * math.sin(t * math.pi * 2))
+                  .clamp(0.0, 1.0)
+                  .toDouble(),
               blur: 6,
               loadingOpacity: loadingPulse,
             ),

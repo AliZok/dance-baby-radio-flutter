@@ -19,7 +19,7 @@ enum ServiceToastKind { info, success, warning, error }
 class AudioService extends ChangeNotifier {
   final SupabaseService _supabaseService = SupabaseService();
   final _random = Random();
-  
+
   // Dual audio players for gapless/seamless transition
   late AudioPlayer _playerPrimary;
   late AudioPlayer _playerSupport;
@@ -27,64 +27,100 @@ class AudioService extends ChangeNotifier {
   // State variables
   Music? _currentOriginTrack; // Primary track
   Music? _currentSupportTrack; // Support track
-  
-  bool _originAudio = false; // false = Primary is active, true = Support is active
+
+  bool _originAudio =
+      false; // false = Primary is active, true = Support is active
   bool _isPlaying = false;
   bool _isLoading = true;
   bool _isAudioReady = false;
   bool _isRepeat = false;
   bool _isTransitioning = false;
+
   /// True when a Next arrived while a switch was already in progress — run
   /// one more transition after the current one finishes (do not drop taps).
   bool _queuedNext = false;
+
   /// In-flight preload of the inactive player after a Next. The next switch
   /// awaits this so we never flip onto a stale track, but we do not hold the
   /// transition lock for the whole network round-trip (that made Next feel
   /// broken and required multiple taps).
   Future<void>? _refillFuture;
+
   /// Bumped whenever a new inactive refill starts so an older in-flight
   /// request cannot overwrite a fresher genre-filter result.
   int _refillGeneration = 0;
+
   /// While true / until this timestamp, ignore ProcessingState.completed so a
   /// timeline scrub cannot race into playNextMusic (same class of bug as the
   /// Nuxt "don't sync both players on seek" fix).
   DateTime? _ignoreCompletedUntil;
   bool _hasStarted = false;
-  // NOTE: the web's Nuxt `letsGoModal` ("Let's GO" intro gate) is deliberately
-  // NOT ported. It exists only because browsers refuse to start audio without a
-  // user gesture; a native app has no such restriction, so playback starts by
-  // itself as soon as the first buffer is hot.
+  // NOTE: the web's Nuxt `letsGoModal` needs a *tap* ("Let's GO") because
+  // browsers refuse to start audio without a user gesture. That reason does not
+  // exist here, so the native twin (widgets/welcome_gate.dart) only *covers*
+  // the player while this first buffer is loading and lifts by itself once the
+  // audio is audible — no tap required.
   /// Nuxt `desiredMode === 'live'` — what the user *asked* for, which is not
   /// necessarily what is playing yet ([_isLiveMode] is the actual mode).
   bool _wantLive = false;
   double _volume = 1.0; // 0.0 to 1.0
   /// Last volume written to the active player (may be faded below [_volume]).
   double _lastAppliedPlayerVolume = 1.0;
+
   /// Fade the active track to silence over this window before it ends.
   static const Duration _fadeOutDuration = Duration(seconds: 4);
+
+  /// Every track gets this budget to actually make sound. When it expires — or
+  /// the URL errors before the first sample — the radio hands over to the
+  /// already-preloaded support buffer instead of sitting on a dead song.
+  static const Duration _playStartBudget = Duration(seconds: 10);
+
   /// How long position may stall while we expect playback before auto-skip.
-  static const Duration _stuckTimeout = Duration(seconds: 11);
+  static const Duration _stuckTimeout = _playStartBudget;
+
   /// Max wait for inactive preload / API before Next proceeds or recovers.
   static const Duration _refillWaitTimeout = Duration(seconds: 8);
-  static const Duration _setUrlTimeout = Duration(seconds: 12);
-  /// Cover spinner stuck longer than this → force skip to next track.
-  static const Duration _loadingStuckTimeout = Duration(seconds: 13);
+  static const Duration _setUrlTimeout = _playStartBudget;
+
+  /// Cover spinner stuck longer than this → force skip to next track. Sits just
+  /// above the play budget so the "flip to support" path wins the race.
+  static const Duration _loadingStuckTimeout = Duration(seconds: 12);
+
   /// Prevents stacked error→skip handlers from fighting over the dual players.
   bool _handlingPlaybackError = false;
+
+  /// True between "we asked this song for sound" and "the first sample is out".
+  /// A player error while this is set means the URL is dead → hand over to the
+  /// support buffer immediately instead of waiting for the watchdog.
+  bool _awaitingFirstSample = false;
+
+  /// Track + timestamp of the last error-driven hand-over, so one dead URL can
+  /// never trigger two skips (the player error stream and the play-confirm
+  /// timeout both report the same song).
+  Music? _lastErrorSkippedTrack;
+  DateTime? _lastErrorSkipAt;
+  static const Duration _errorSkipDedupe = Duration(seconds: 4);
+
   /// Caps auto-skip storms when several bad URLs land in a row.
   int _consecutiveLoadFailures = 0;
   static const int _maxConsecutiveLoadFailures = 8;
+
   /// True while radio should keep producing audio (not user-paused / stopped).
   bool _expectingPlayback = false;
+
   /// When cover loading started (for stuck-loading recovery).
   DateTime? _loadingSince;
+
   /// Soft pull-to-refresh already in flight (ignore extra swipes).
   bool _softRefreshInFlight = false;
+
   /// Bumped on each loading-stuck recovery so a hung playNext cannot block
-  /// the next 13s watchdog fire (the old bool reentrancy lock did that).
+  /// the next watchdog fire (the old bool reentrancy lock did that).
   int _loadingRecoveryGeneration = 0;
+
   /// Last position that counted as real progress (for stuck detection).
   Duration _lastProgressPosition = Duration.zero;
+
   /// When position last advanced while we expected playback.
   DateTime? _lastProgressAt;
   Timer? _stuckWatchTimer;
@@ -106,12 +142,15 @@ class AudioService extends ChangeNotifier {
   bool _isLiveMode = false;
   bool _liveBusy = false;
   bool _liveAdvanceBusy = false;
+
   /// Nuxt `liveAdvanceQueued` — an advance arrived while one was already in
   /// flight. Dropping it used to leave the station stuck at the end of a track.
   bool _liveAdvanceQueued = false;
+
   /// Nuxt `liveFailCount` — a local load failure re-syncs the station once and
   /// only takes over (skipping for *every* listener) on the second failure.
   int _liveFailCount = 0;
+
   /// Nuxt `lastLoadingSkipAt` + `LOADING_SKIP_DEBOUNCE_MS` (400 ms).
   DateTime? _lastLoadingSkipAt;
   static const Duration _loadingSkipDebounce = Duration(milliseconds: 400);
@@ -135,6 +174,7 @@ class AudioService extends ChangeNotifier {
   int _liveClaimsInRow = 0;
   bool _liveStationBlocked = false;
   static const int _maxLiveClaimsWithoutPlayback = 3;
+
   /// Rate-limits the "station never loaded, keep trying" recovery in the tick.
   DateTime? _lastLiveStationRetryAt;
 
@@ -150,7 +190,7 @@ class AudioService extends ChangeNotifier {
   StreamSubscription? _primaryDurationSub;
   StreamSubscription? _primaryStateSub;
   StreamSubscription? _primaryErrorSub;
-  
+
   StreamSubscription? _supportPositionSub;
   StreamSubscription? _supportDurationSub;
   StreamSubscription? _supportStateSub;
@@ -159,10 +199,13 @@ class AudioService extends ChangeNotifier {
   // Getters
   Music? get currentOriginTrack => _currentOriginTrack;
   Music? get currentSupportTrack => _currentSupportTrack;
-  
-  Music? get activeTrack => _originAudio ? _currentSupportTrack : _currentOriginTrack;
-  AudioPlayer get activePlayer => _originAudio ? _playerSupport : _playerPrimary;
-  AudioPlayer get inactivePlayer => _originAudio ? _playerPrimary : _playerSupport;
+
+  Music? get activeTrack =>
+      _originAudio ? _currentSupportTrack : _currentOriginTrack;
+  AudioPlayer get activePlayer =>
+      _originAudio ? _playerSupport : _playerPrimary;
+  AudioPlayer get inactivePlayer =>
+      _originAudio ? _playerPrimary : _playerSupport;
 
   bool get originAudio => _originAudio;
   bool get isPlaying => _isPlaying;
@@ -240,8 +283,10 @@ class AudioService extends ChangeNotifier {
 
   StreamSubscription<AudioInterruptionEvent>? _interruptionSub;
   StreamSubscription<void>? _becomingNoisySub;
+
   /// After a transient focus loss (call / OEM quirk), resume if we still want audio.
   bool _resumeAfterInterruption = false;
+
   /// Debounce OEM lock-screen pause→play storms.
   DateTime? _lastUnexpectedResumeAt;
 
@@ -260,7 +305,9 @@ class AudioService extends ChangeNotifier {
     if (genresJson != null) {
       try {
         final List<dynamic> decoded = jsonDecode(genresJson);
-        _genres = decoded.map((item) => Genre.fromJson(item as Map<String, dynamic>)).toList();
+        _genres = decoded
+            .map((item) => Genre.fromJson(item as Map<String, dynamic>))
+            .toList();
       } catch (e) {
         print('Error decoding genres from prefs: $e');
       }
@@ -345,8 +392,7 @@ class AudioService extends ChangeNotifier {
           _resumeAfterInterruption = _expectingPlayback || _isPlaying;
         }
       } else {
-        final shouldResume =
-            _resumeAfterInterruption || _expectingPlayback;
+        final shouldResume = _resumeAfterInterruption || _expectingPlayback;
         _resumeAfterInterruption = false;
         if (shouldResume && (_expectingPlayback || _hasStarted)) {
           unawaited(resumeAudio());
@@ -427,11 +473,18 @@ class AudioService extends ChangeNotifier {
     notifyListeners();
 
     try {
-      // Fetch both in parallel
-      final results = await Future.wait([
-        _fetchNextTrack(),
-        _fetchNextTrack(),
-      ]);
+      // Fetch both in parallel, each inside the play budget. A Supabase call
+      // that never answers used to hang the whole boot silently.
+      Future<Music?> grab() async {
+        try {
+          return await _fetchNextTrack().timeout(_playStartBudget);
+        } catch (e) {
+          print('Initial track fetch failed: $e');
+          return null;
+        }
+      }
+
+      final results = await Future.wait([grab(), grab()]);
 
       _currentOriginTrack = results[0];
       _currentSupportTrack = results[1];
@@ -445,20 +498,39 @@ class AudioService extends ChangeNotifier {
         );
       }
 
-      // Preload players
-      await _preloadPrimary();
-      await _preloadSupport();
+      // One dead fetch must not blank the start: aim the first play() at the
+      // side that actually returned a song.
+      if (_currentOriginTrack == null && _currentSupportTrack != null) {
+        print('Origin fetch returned nothing — starting on the support track');
+        _originAudio = true;
+      } else if (_currentOriginTrack != null) {
+        _originAudio = false;
+      }
 
+      // Preload both players in parallel. Sequentially, one slow media server
+      // could burn its whole setUrl budget before the other song was even
+      // requested — which is exactly how the first track ended up "never
+      // starting" on a cold app open.
+      await Future.wait([_preloadPrimary(), _preloadSupport()]);
+
+      // Start on whichever buffer is actually ready. If only the support side
+      // made it in time, flip now so the very first play() targets a live
+      // buffer instead of spending the 10 s budget on a dead URL.
+      bool supportWon = false;
       try {
-        await _waitUntilPlayableInstantly(_playerPrimary);
+        supportWon = await _waitEitherBufferPlayable();
       } catch (e) {
         print('Intro buffer wait failed: $e');
       }
+      if (supportWon && !_isHotEnoughToPlay(_playerPrimary)) {
+        print('Origin buffer not startable — booting on the support track');
+        _originAudio = true;
+      }
 
-      // Origin buffer is hot enough to start without a stall.
+      // Active buffer is hot enough to start without a stall.
       _isLoading = false;
-      _isAudioReady = _playerPrimary.processingState == ProcessingState.ready ||
-          _isHotEnoughToPlay(_playerPrimary);
+      _isAudioReady = _isHotEnoughToPlay(activePlayer) ||
+          activePlayer.processingState == ProcessingState.ready;
       notifyListeners();
     } catch (e) {
       print('Error loading initial tracks: $e');
@@ -556,7 +628,7 @@ class AudioService extends ChangeNotifier {
   }
 
   static const Duration _introMinBuffer = Duration(seconds: 6);
-  static const Duration _introWaitTimeout = Duration(seconds: 25);
+  static const Duration _introWaitTimeout = _playStartBudget;
 
   bool _isHotEnoughToPlay(AudioPlayer player) {
     final buffered = player.bufferedPosition;
@@ -569,7 +641,38 @@ class AudioService extends ChangeNotifier {
     return buffered >= _introMinBuffer;
   }
 
-  /// Hold the boot overlay until the origin player has a real startable buffer
+  /// Holds the boot / reload cover until *either* preloaded buffer can start
+  /// instantly, and reports which side won.
+  ///
+  /// Waiting only on the origin side used to be the "first song never plays"
+  /// bug: one slow or dead URL on track #1 stalled the whole start for the full
+  /// intro timeout (25 s before) while the support buffer was already hot.
+  Future<bool> _waitEitherBufferPlayable() async {
+    final won = Completer<bool>();
+
+    Future<void> watch(AudioPlayer player, {required bool isSupport}) async {
+      try {
+        await _waitUntilPlayableInstantly(player);
+        if (!won.isCompleted) won.complete(isSupport);
+      } catch (e) {
+        // This side gave up — the other one may still make it audible.
+      }
+    }
+
+    unawaited(watch(_playerPrimary, isSupport: false));
+    unawaited(watch(_playerSupport, isSupport: true));
+
+    try {
+      return await won.future.timeout(_introWaitTimeout);
+    } on TimeoutException {
+      // Neither side got a startable buffer in time: start on whichever is
+      // closer, so the 10 s play budget below is spent on the better candidate.
+      return _isHotEnoughToPlay(_playerSupport) &&
+          !_isHotEnoughToPlay(_playerPrimary);
+    }
+  }
+
+  /// Hold the boot overlay until a preloaded player has a real startable buffer
   /// (same idea as the Nuxt intro wait — not just "metadata loaded").
   Future<void> _waitUntilPlayableInstantly(AudioPlayer player) async {
     if (_isHotEnoughToPlay(player)) return;
@@ -589,8 +692,8 @@ class AudioService extends ChangeNotifier {
         done.complete();
         return;
       }
-      final stalled =
-          DateTime.now().difference(lastChange) >= const Duration(milliseconds: 1500);
+      final stalled = DateTime.now().difference(lastChange) >=
+          const Duration(milliseconds: 1500);
       if (stalled &&
           player.processingState == ProcessingState.ready &&
           buffered >= const Duration(seconds: 2)) {
@@ -602,7 +705,8 @@ class AudioService extends ChangeNotifier {
       player.bufferedPositionStream.listen((_) => consider()),
       player.playerStateStream.listen((_) => consider()),
     ];
-    final poll = Timer.periodic(const Duration(milliseconds: 250), (_) => consider());
+    final poll =
+        Timer.periodic(const Duration(milliseconds: 250), (_) => consider());
     final timeout = Timer(_introWaitTimeout, () {
       if (done.isCompleted) return;
       if (player.processingState == ProcessingState.ready &&
@@ -688,7 +792,8 @@ class AudioService extends ChangeNotifier {
     });
 
     // Async load/play failures never reach the unawaited play() caller.
-    // Do NOT skip immediately — wait for the 11s stuck watchdog so a transient
+    // _onActivePlaybackGlitch decides: no sample yet → hand over to the support
+    // buffer now; already audible → wait for the stuck watchdog, so a transient
     // glitch mid-song cannot jump tracks.
     _primaryErrorSub = _playerPrimary.playbackEventStream.listen(
       (_) {},
@@ -764,7 +869,8 @@ class AudioService extends ChangeNotifier {
   }
 
   void _markLoading() {
-    // New loading episode → restart the 13s clock (do not keep an old stamp).
+    // New loading episode → restart the backstop clock (do not keep an old
+    // stamp from a previous episode).
     if (!_isLoading || _loadingSince == null) {
       _loadingSince = DateTime.now();
     }
@@ -844,12 +950,24 @@ class AudioService extends ChangeNotifier {
       _lastProgressPosition = pos;
       _lastProgressAt = DateTime.now();
     }
+    // A moving playhead means real samples are out — from now on an error is a
+    // mid-song glitch (watchdog path), not a "song never started" failure.
+    if (pos > const Duration(milliseconds: 80)) _awaitingFirstSample = false;
   }
 
-  /// Soft error while a track should be playing — try resume once, then let the
-  /// 11s stuck watchdog decide whether to skip.
+  /// Soft error while a track should be playing.
+  ///
+  /// If the song never delivered a single sample, do not burn the watchdog
+  /// window on it: hand over to the support buffer right away. Once audio was
+  /// audible, try one resume and let the [_stuckTimeout] watch decide whether
+  /// to skip (a brief network hiccup should not cut the song).
   void _onActivePlaybackGlitch() {
     if (!_expectingPlayback || _isTransitioning) return;
+    if (_awaitingFirstSample) {
+      print('Error before the first sample — switching to the support track');
+      unawaited(_onActiveTrackFailed(activeTrack));
+      return;
+    }
     // Ensure the stuck clock is running from the last real progress.
     _lastProgressAt ??= DateTime.now();
     _ensureStuckWatch();
@@ -871,7 +989,8 @@ class AudioService extends ChangeNotifier {
     }
     final now = DateTime.now();
     final last = _lastUnexpectedResumeAt;
-    if (last != null && now.difference(last) < const Duration(milliseconds: 800)) {
+    if (last != null &&
+        now.difference(last) < const Duration(milliseconds: 800)) {
       return;
     }
     _lastUnexpectedResumeAt = now;
@@ -900,8 +1019,8 @@ class AudioService extends ChangeNotifier {
   }
 
   void _checkStuckPlayback() {
-    // Loading > 13s → always force next, even mid-transition. A hung
-    // playNext/refill used to keep the cover spinner forever.
+    // Loading longer than the backstop → always force next, even mid-transition.
+    // A hung playNext/refill used to keep the cover spinner forever.
     if (_expectingPlayback && _isLoading) {
       _loadingSince ??= DateTime.now();
       final since = _loadingSince!;
@@ -938,7 +1057,7 @@ class AudioService extends ChangeNotifier {
     _queuedNext = false;
     _refillGeneration++;
     _refillFuture = null;
-    // Fresh 13s window for this recovery attempt (and any later hang).
+    // Fresh backstop window for this recovery attempt (and any later hang).
     _loadingSince = DateTime.now();
     _isLoading = true;
     _ensureStuckWatch();
@@ -959,7 +1078,7 @@ class AudioService extends ChangeNotifier {
       print('Loading-stuck recovery failed: $e');
       if (identical(generation, _loadingRecoveryGeneration) ||
           generation == _loadingRecoveryGeneration) {
-        // Keep spinner + clock so the watchdog can fire again in 13s.
+        // Keep spinner + clock so the watchdog can fire again next window.
         _markLoading();
         _loadingSince = DateTime.now();
       }
@@ -1059,9 +1178,25 @@ class AudioService extends ChangeNotifier {
       await _recoverLiveFailure();
       return;
     }
+    // The same dead URL is reported twice at boot — once by the player error
+    // stream (fail fast) and once by the play-confirm timeout. Flip songs a
+    // single time per track, or the second hand-over would skip the support
+    // buffer the user was supposed to hear.
+    final now = DateTime.now();
+    if (failed != null &&
+        _lastErrorSkippedTrack?.id == failed.id &&
+        _lastErrorSkipAt != null &&
+        now.difference(_lastErrorSkipAt!) < _errorSkipDedupe) {
+      print('Hand-over for "${failed.title}" already in flight — ignored');
+      return;
+    }
+    _lastErrorSkippedTrack = failed;
+    _lastErrorSkipAt = now;
+
     if (_consecutiveLoadFailures >= _maxConsecutiveLoadFailures) {
       print('Too many consecutive load failures — stopping auto-skip');
       _expectingPlayback = false;
+      _awaitingFirstSample = false;
       _disarmStuckWatch();
       _isPlaying = false;
       _markNotLoading();
@@ -1071,7 +1206,7 @@ class AudioService extends ChangeNotifier {
 
     _handlingPlaybackError = true;
     _consecutiveLoadFailures++;
-    // Reset stuck clock so the replacement track gets a fresh 11s window.
+    // Reset stuck clock so the replacement track gets a fresh play budget.
     _disarmStuckWatch();
 
     // Deactivation DISABLED on purpose (see _replaceFailedSide): a transient
@@ -1093,14 +1228,24 @@ class AudioService extends ChangeNotifier {
   ///
   /// Important: do NOT treat `playing + buffering` as success — that cleared
   /// the loading spinner before any samples were audible.
+  ///
+  /// The whole attempt runs inside [_playStartBudget] (10 s). On timeout or a
+  /// player error the caller hands the track over to the support buffer
+  /// (`_onActiveTrackFailed` → `playNextMusic`), so no song can ever eat more
+  /// than 10 seconds of silence.
   Future<void> _playActiveAndConfirm({
-    Duration timeout = const Duration(seconds: 11),
+    Duration timeout = _playStartBudget,
   }) async {
     final player = activePlayer;
     final completer = Completer<void>();
     StreamSubscription<PlayerState>? stateSub;
     StreamSubscription<Duration>? positionSub;
     StreamSubscription<PlaybackEvent>? errorSub;
+
+    // "No sound yet" marker for the error listeners: while this attempt has not
+    // delivered a single sample, an error means "switch song now" instead of
+    // waiting for the stuck watchdog to expire.
+    _awaitingFirstSample = true;
 
     void succeed() {
       if (!completer.isCompleted) completer.complete();
@@ -1139,6 +1284,7 @@ class AudioService extends ChangeNotifier {
         }));
       }
       await completer.future.timeout(timeout);
+      _awaitingFirstSample = false;
       _consecutiveLoadFailures = 0;
       _isPlaying = true;
       _markNotLoading();
@@ -1208,7 +1354,8 @@ class AudioService extends ChangeNotifier {
       }
     } catch (e) {
       print('Playback mode switch failed: $e');
-      _emitToast('Could not switch radio mode.', 'Radio', ServiceToastKind.error);
+      _emitToast(
+          'Could not switch radio mode.', 'Radio', ServiceToastKind.error);
       // Snap the requested mode back to what is actually playing.
       _wantLive = _isLiveMode;
       notifyListeners();
@@ -1336,7 +1483,7 @@ class AudioService extends ChangeNotifier {
     // cannot block every subsequent Next tap / auto-advance.
     await _ensureInactiveReadyForFlip();
 
-    // A 13s loading recovery may have started a newer Next while we waited.
+    // A loading-stuck recovery may have started a newer Next while we waited.
     if (recoveryGenAtStart != _loadingRecoveryGeneration) {
       return;
     }
@@ -1504,9 +1651,8 @@ class AudioService extends ChangeNotifier {
         DateTime.now().add(const Duration(milliseconds: 1500));
     try {
       await _playerPrimary.setUrl(previous.audio).timeout(_setUrlTimeout);
-      _currentSupportTrack = _currentSupportTrack?.id == previous.id
-          ? null
-          : _currentSupportTrack;
+      _currentSupportTrack =
+          _currentSupportTrack?.id == previous.id ? null : _currentSupportTrack;
       _currentTime = Duration.zero;
       _duration = _playerPrimary.duration ?? Duration.zero;
       _restoreFullVolume();
@@ -1669,7 +1815,8 @@ class AudioService extends ChangeNotifier {
     // actually belongs to the genre being switched off — never touch the
     // playing buffer.
     if (turningOff && !isPlaylistMode && !_isLiveMode) {
-      final upcoming = _originAudio ? _currentOriginTrack : _currentSupportTrack;
+      final upcoming =
+          _originAudio ? _currentOriginTrack : _currentSupportTrack;
       if (_trackHasGenre(upcoming, genre.genre)) {
         _scheduleInactiveRefill();
       }
@@ -1822,7 +1969,8 @@ class AudioService extends ChangeNotifier {
       if (row == null || !row.hasAudio) {
         _markNotLoading();
         notifyListeners();
-        _emitToast('Live radio is unavailable right now.', 'Live', ServiceToastKind.warning);
+        _emitToast('Live radio is unavailable right now.', 'Live',
+            ServiceToastKind.warning);
         return;
       }
       if (await _applyLiveRow(row, play: true)) {
@@ -1942,7 +2090,7 @@ class AudioService extends ChangeNotifier {
     }
     // Re-baseline the stuck-playhead clock. It still holds the *previous* buffer's
     // position, so joining a station 100 s in (or a shorter track) would never
-    // satisfy `pos > _lastProgressPosition + 150ms` — the 11 s watchdog then read
+    // satisfy `pos > _lastProgressPosition + 150ms` — the stuck watchdog then read
     // healthy live audio as frozen and advanced the shared station for everyone.
     _lastProgressPosition = _playerPrimary.position;
     _lastProgressAt = DateTime.now();
@@ -2103,7 +2251,8 @@ class AudioService extends ChangeNotifier {
         // station for every other listener and wait for the user.
         if (++_liveClaimsInRow > _maxLiveClaimsWithoutPlayback) {
           _liveStationBlocked = true;
-          print('Live station claimed $_liveClaimsInRow tracks without playback '
+          print(
+              'Live station claimed $_liveClaimsInRow tracks without playback '
               '— blocking station writes');
           _markNotLoading();
           _emitToast(
@@ -2208,7 +2357,8 @@ class AudioService extends ChangeNotifier {
     }
 
     final elapsed = LiveStation.getElapsedSeconds(row.startedAt);
-    final mediaSeconds = (_playerPrimary.duration?.inMilliseconds ?? 0) / 1000.0;
+    final mediaSeconds =
+        (_playerPrimary.duration?.inMilliseconds ?? 0) / 1000.0;
     if (mediaSeconds > 0 && elapsed >= mediaSeconds - 0.35) {
       // The station clock passed the end of the loaded media. Same rule as the
       // web's `maybeAdvanceLiveIfFinished()`, and the claim breaker caps it if
@@ -2262,7 +2412,7 @@ class AudioService extends ChangeNotifier {
     _supportDurationSub?.cancel();
     _supportStateSub?.cancel();
     _supportErrorSub?.cancel();
-    
+
     _playerPrimary.dispose();
     _playerSupport.dispose();
     super.dispose();
