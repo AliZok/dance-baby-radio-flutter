@@ -676,10 +676,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                           size: 150,
                                         ),
 
-                                      // Play Button Overlay (when paused and not loading)
-                                      // Group-opacity 0.4 matches the frontend's
-                                      // `.play-button-box { opacity: 0.4 }` rule, which
-                                      // dims the whole circle + triangle together.
+                                      // Play Button Overlay (when paused and not loading).
+                                      // Hidden while audio is running; while paused
+                                      // the circle stays clearly visible over the cover.
                                       if (!isLoading)
                                         GestureDetector(
                                           behavior: HitTestBehavior.opaque,
@@ -688,7 +687,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                             widget.audioService.playMusic();
                                           },
                                           child: Opacity(
-                                            opacity: isPlaying ? 0 : 0.4,
+                                            opacity: isPlaying ? 0 : 0.92,
                                             child: Container(
                                               width: 150,
                                               height: 150,
@@ -721,15 +720,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                   // Seek Slider — commit on finger-up only
                                   // (Nuxt: isSeeking + seek on change), so a
                                   // drag cannot race into the next track.
-                                  // Nuxt `:disabled="isLiveMode"` +
-                                  // `.slider.live-locked { pointer-events: none;
-                                  // opacity: .55 }` — the station clock is not
-                                  // ours to scrub, and the thumb must not move.
-                                  Opacity(
-                                    opacity: isLiveMode ? 0.55 : 1.0,
-                                    child: IgnorePointer(
-                                      ignoring: isLiveMode,
-                                      child: SliderTheme(
+                                  // Live radio follows the station clock, so the
+                                  // track timeline is not shown there.
+                                  if (!isLiveMode)
+                                    SliderTheme(
                                         data: SliderTheme.of(context).copyWith(
                                           activeTrackColor:
                                               const Color(0xFF58D1EF),
@@ -777,8 +771,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                           },
                                         ),
                                       ),
-                                    ),
-                                  ),
 
                                   // Mobile frontend keeps metadata collapsed on
                                   // first render (`max-h-0`) and slides it open

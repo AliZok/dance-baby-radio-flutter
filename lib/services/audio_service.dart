@@ -140,6 +140,9 @@ class AudioService extends ChangeNotifier {
   // client (web + this app) in sync by seeking to the station's elapsed time.
   final LiveService _liveService = LiveService();
   bool _isLiveMode = false;
+
+  /// Last radio mode the listener chose. Restored on the next cold start.
+  static const String _playbackModeKey = 'playbackMode';
   bool _liveBusy = false;
   bool _liveAdvanceBusy = false;
 
@@ -317,8 +320,15 @@ class AudioService extends ChangeNotifier {
     // away: the app starts on air. The web has to wait for the "Let's GO" tap
     // because of the browser autoplay policy — that restriction does not exist
     // here, and Android happily attaches the media session to the first play().
+    // Reopen in the last radio mode (live or random). Playlists are a session
+    // choice and are not restored.
+    final startLive = prefs.getString(_playbackModeKey) == 'live';
     await _loadInitialTracks();
-    await playMusic();
+    if (startLive) {
+      await enterLiveMode(announce: false);
+    } else {
+      await playMusic();
+    }
     _armBootAutoplayRetry();
   }
 
@@ -552,6 +562,7 @@ class AudioService extends ChangeNotifier {
       _liveStation = null;
       _liveLoadedAudio = '';
       _lastAppliedLiveIdentity = '';
+      await _savePlaybackMode(false);
     }
 
     final playable = tracks.where((t) => t.audio.isNotEmpty).toList();
@@ -1326,6 +1337,12 @@ class AudioService extends ChangeNotifier {
   // Desired vs actual playback mode (Nuxt usePlaybackMode + watch(desiredMode))
   // ---------------------------------------------------------------------------
 
+  /// Remember live vs random so the next launch starts in the same mode.
+  Future<void> _savePlaybackMode(bool live) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_playbackModeKey, live ? 'live' : 'random');
+  }
+
   /// Nuxt `requestLive()` — ask for the shared live station. Deferred (but
   /// remembered) while the Let's GO gate is still on screen.
   void requestLive() => _requestMode(true);
@@ -1836,7 +1853,9 @@ class AudioService extends ChangeNotifier {
   // ---------------------------------------------------------------------------
 
   /// Enter the shared live station (primary player only, station-clock synced).
-  Future<void> enterLiveMode() async {
+  /// [announce] is false when restoring the saved mode on launch, so the
+  /// "Radio Live" toast is only shown for a switch the listener just made.
+  Future<void> enterLiveMode({bool announce = true}) async {
     if (_isLiveMode) return;
     _wantLive = true;
     _liveBusy = true;
@@ -1884,6 +1903,7 @@ class AudioService extends ChangeNotifier {
       _playbackHistory.clear();
       _consecutiveLoadFailures = 0;
       _isLiveMode = true;
+      await _savePlaybackMode(true);
       _hasStarted = true;
       _expectingPlayback = true;
       _isTransitioning = false;
@@ -1912,7 +1932,7 @@ class AudioService extends ChangeNotifier {
       );
       _startLiveResyncTimer();
 
-      _emitToast('Radio Live', 'Live radio');
+      if (announce) _emitToast('Radio Live', 'Live radio');
     } finally {
       _liveBusy = false;
       notifyListeners();
@@ -1925,6 +1945,7 @@ class AudioService extends ChangeNotifier {
     if (!_isLiveMode) return;
     _isLiveMode = false;
     _wantLive = false;
+    await _savePlaybackMode(false);
     _liveBusy = true;
     notifyListeners();
     try {
