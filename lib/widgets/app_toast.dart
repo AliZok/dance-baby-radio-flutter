@@ -33,8 +33,8 @@ class _ToastModel {
 
 /// Global notification stack matching Nuxt `components/NotificationStack`:
 /// cards appear under the status bar, several can stack at once, each has a
-/// type icon / coloured border, an auto-dismiss progress bar, a close button,
-/// and the countdown pauses while the user touches (or hovers) the card.
+/// type icon / coloured border and a close button. Auto-dismiss still runs on
+/// a timer, and that timer pauses while the user touches (or hovers) the card.
 class AppToast {
   AppToast._();
 
@@ -308,9 +308,13 @@ class _ToastCardState extends State<_ToastCard>
   /// Nuxt `splitHighlight()` — the accent word inside the message body.
   Widget _buildMessage() {
     final highlight = widget.toast.highlight;
+    // Overlay sits under MaterialApp's error DefaultTextStyle (red text,
+    // yellow underline). Explicit styles must clear that decoration or the
+    // underline survives the colour override.
     final style = TextStyle(
       fontSize: 13,
       height: 1.5,
+      decoration: TextDecoration.none,
       color: const Color(0xFFE8FBFF).withOpacity(0.92),
     );
     if (highlight == null || highlight.isEmpty || !widget.toast.message.contains(highlight)) {
@@ -329,52 +333,16 @@ class _ToastCardState extends State<_ToastCard>
       parts.add(
         TextSpan(
           text: highlight,
-          style: const TextStyle(color: Color(0xFF84F3FF), fontWeight: FontWeight.w600),
+          style: const TextStyle(
+            color: Color(0xFF84F3FF),
+            fontWeight: FontWeight.w600,
+            decoration: TextDecoration.none,
+          ),
         ),
       );
       remaining = remaining.substring(at + highlight.length);
     }
     return RichText(text: TextSpan(style: style, children: parts));
-  }
-
-  List<Color> get _progressColors {
-    switch (widget.toast.kind) {
-      case AppToastKind.success:
-        return const [Color(0xFF64EEB4), Color(0x7364EEB4)];
-      case AppToastKind.error:
-        return const [Color(0xFFFF6B8A), Color(0x73FF6B8A)];
-      case AppToastKind.warning:
-        return const [Color(0xFFFFD060), Color(0x73FFD060)];
-      case AppToastKind.info:
-        return const [Color(0xF284F3FF), Color(0x8C58D1EF)];
-    }
-  }
-
-  Widget _buildProgressBar() {
-    final controller = _countdown;
-    if (controller == null) return const SizedBox.shrink();
-    return Positioned(
-      left: 0,
-      right: 0,
-      bottom: 0,
-      height: 2,
-      child: AnimatedBuilder(
-        animation: controller,
-        builder: (context, child) => Align(
-          alignment: Alignment.centerLeft,
-          child: FractionallySizedBox(
-            widthFactor: controller.value.clamp(0.0, 1.0),
-            child: child,
-          ),
-        ),
-        child: Container(
-          height: 2,
-          decoration: BoxDecoration(
-            gradient: LinearGradient(colors: _progressColors),
-          ),
-        ),
-      ),
-    );
   }
 
   @override
@@ -434,6 +402,7 @@ class _ToastCardState extends State<_ToastCard>
                                     fontSize: 13,
                                     fontWeight: FontWeight.w700,
                                     letterSpacing: 0.2,
+                                    decoration: TextDecoration.none,
                                     color: Color(0xFFD8F6FF),
                                   ),
                                 ),
@@ -466,7 +435,6 @@ class _ToastCardState extends State<_ToastCard>
                       ),
                     ),
                   ),
-                  _buildProgressBar(),
                 ],
               ),
             ),
